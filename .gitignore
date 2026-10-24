@@ -41,3 +41,8 @@ scratchpad/
 .claude/worktrees/
 __pycache__/
 /target-*/
+
+# Switch build output: the .nro holds code and text made from the game, never publish it
+*.nro
+*.nacp
+*.elf

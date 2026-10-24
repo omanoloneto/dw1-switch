@@ -1,0 +1,15 @@
+diff --git a/src/unix/newlib/mod.rs b/src/unix/newlib/mod.rs
+index e54aed4..f1a9c28 100644
+--- a/src/unix/newlib/mod.rs
++++ b/src/unix/newlib/mod.rs
+@@ -24,6 +24,10 @@ cfg_if! {
+         pub type dev_t = u32;
+         pub type ino_t = u32;
+         pub type off_t = i64;
++    } else if #[cfg(all(target_arch = "aarch64", target_os = "horizon"))] {
++        pub type dev_t = c_short;
++        pub type ino_t = c_ushort;
++        pub type off_t = c_long;
+     } else {
+         compile_error!("unsupported target");
+     }
