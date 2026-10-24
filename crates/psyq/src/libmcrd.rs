@@ -985,6 +985,8 @@ pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()>
             .open(&tmp)?;
         f.write_all(bytes)?;
         f.sync_all()?;
+        // Closed before the rename: Horizon won't rename a file that is still open.
+        drop(f);
         replace_file(&tmp, path)?;
         sync_dir(path)
     })();
