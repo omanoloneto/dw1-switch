@@ -1,7 +1,11 @@
+#include <pthread.h>
+#include <stdalign.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+
+#include <netinet/in.h>
 
 #include <SDL2/SDL.h>
 #include <switch.h>
@@ -162,6 +166,38 @@ _Noreturn void dw1_platform_fatal(const char *message)
 	exit(1);
 }
 
+/* A crash prints where it happened (offsets into dw1.elf, for addr2line) and ends the program. */
+alignas(16) u8 __nx_exception_stack[0x4000];
+u64 __nx_exception_stack_size = sizeof(__nx_exception_stack);
+extern char __start__[];
+
+void __libnx_exception_handler(ThreadExceptionDump *ctx)
+{
+	uintptr_t base = (uintptr_t)__start__;
+	printf("dw1: crash (exception %u): pc %#lx lr %#lx far %#lx sp %#lx\n", ctx->error_desc,
+	       ctx->pc.x - base, ctx->lr.x - base, ctx->far.x, ctx->sp.x);
+	uint64_t *frame = (uint64_t *)ctx->fp.x;
+	for (int i = 0; i < 16 && frame && ((uintptr_t)frame & 0xF) == 0; i++) {
+		printf("dw1:   called from %#lx\n", frame[1] - base);
+		frame = (uint64_t *)frame[0];
+	}
+	fflush(stdout);
+	svcSleepThread(500000000);
+	svcExitProcess();
+}
+
+/* The Mac's main thread has 8 MB of stack; the game gets as much on a thread of its own. */
+enum { GAME_STACK_SIZE = 8 << 20 };
+
+static int game_status;
+
+static void *game_thread(void *arg)
+{
+	(void)arg;
+	game_status = dw1_switch_main();
+	return NULL;
+}
+
 int main(int argc, char **argv)
 {
 	(void)argc;
@@ -171,5 +207,12 @@ int main(int argc, char **argv)
 		atexit(socketExit);
 		nxlinkStdio();
 	}
-	return dw1_switch_main();
+	pthread_attr_t attr;
+	pthread_t thread;
+	pthread_attr_init(&attr);
+	pthread_attr_setstacksize(&attr, GAME_STACK_SIZE);
+	if (pthread_create(&thread, &attr, game_thread, NULL) != 0)
+		dw1_platform_fatal("Couldn't start the game's thread.");
+	pthread_join(thread, NULL);
+	return game_status;
 }

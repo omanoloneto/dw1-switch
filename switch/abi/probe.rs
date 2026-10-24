@@ -88,6 +88,7 @@ size!(probe_size_pthread_cond_t, libc::pthread_cond_t);
 align!(probe_align_pthread_cond_t, libc::pthread_cond_t);
 size!(probe_size_pthread_condattr_t, libc::pthread_condattr_t);
 size!(probe_size_pthread_rwlock_t, libc::pthread_rwlock_t);
+size!(probe_size_pthread_rwlockattr_t, libc::pthread_rwlockattr_t);
 
 value!(probe_value_O_RDONLY, libc::O_RDONLY);
 value!(probe_value_O_WRONLY, libc::O_WRONLY);
@@ -114,7 +115,6 @@ value!(probe_value_CLOCK_REALTIME, libc::CLOCK_REALTIME);
 value!(probe_value_CLOCK_MONOTONIC, libc::CLOCK_MONOTONIC);
 value!(probe_value_PTHREAD_MUTEX_NORMAL, libc::PTHREAD_MUTEX_NORMAL);
 value!(probe_value_PTHREAD_MUTEX_RECURSIVE, libc::PTHREAD_MUTEX_RECURSIVE);
-value!(probe_value_PTHREAD_STACK_MIN, libc::PTHREAD_STACK_MIN);
 value!(probe_value_ENOENT, libc::ENOENT);
 value!(probe_value_EINTR, libc::EINTR);
 value!(probe_value_EAGAIN, libc::EAGAIN);

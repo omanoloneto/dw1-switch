@@ -54,10 +54,10 @@ The `.nro` holds code and text made from the game. It's for your own console; do
 
 - [x] Switch layer written (`crates/switch`, `switch/source`).
 - [x] Game C built as ELF (overlay sections, newlib's setjmp, symbol check against newlib); the Mac build is unchanged and its output identical.
-- [x] Rust's std builds for the target with the provisional libc patch.
-- [ ] Settle the libc patch with `tools/check-switch-abi.sh`.
-- [ ] `psyq::memory`: the data segment bounds from `switch.ld`'s symbols.
-- [ ] First linked `.nro`; C shims for whatever std needs and newlib lacks.
+- [x] The libc patch matches devkitA64's newlib (`tools/check-switch-abi.sh`: 89 of 89).
+- [x] `psyq::memory`: the packet link window is `__data_start`..`__end__` from `switch.ld` (7.9 MB of the 16 MB links reach).
+- [x] First linked `.nro` (9 MB): only relative relocations; `getrandom`, `pread` and `sysconf` shimmed in `switch/source/libc_shims.c`.
+- [x] The game runs on its own thread with 8 MB of stack, as the Mac's main thread has; a crash prints its addresses through nxlink.
 - [ ] Running on the console: title screen, sound, input, saving.
 - [ ] Performance on the console (HD scale, `backend::hd` threads).
 - [ ] Options without a keyboard (scale, no wobble, full colour) through button combos.

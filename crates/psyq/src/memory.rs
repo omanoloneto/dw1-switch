@@ -48,10 +48,14 @@ pub fn ps1_ram_ptr(addr: u32) -> *mut u8 {
 // docs/phase2-plan.md). Linking anything outside it stops the program.
 
 unsafe extern "C" {
-    // ld64 defines these for every segment of the image.
-    #[link_name = "\u{1}segment$start$__DATA"]
+    // ld64 defines these for every segment of the image; on the Switch, libnx's switch.ld marks
+    // where its data segment's .data starts and where its .bss (with the orphan overlay
+    // sections) ends.
+    #[cfg_attr(not(target_os = "horizon"), link_name = "\u{1}segment$start$__DATA")]
+    #[cfg_attr(target_os = "horizon", link_name = "__data_start")]
     static DATA_START: u8;
-    #[link_name = "\u{1}segment$end$__DATA"]
+    #[cfg_attr(not(target_os = "horizon"), link_name = "\u{1}segment$end$__DATA")]
+    #[cfg_attr(target_os = "horizon", link_name = "__end__")]
     static DATA_END: u8;
 }
 

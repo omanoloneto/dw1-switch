@@ -1,8 +1,25 @@
 diff --git a/src/unix/newlib/mod.rs b/src/unix/newlib/mod.rs
-index e54aed4..f1a9c28 100644
+index e54aed4..e8eaf2f 100644
 --- a/src/unix/newlib/mod.rs
 +++ b/src/unix/newlib/mod.rs
-@@ -24,6 +24,10 @@ cfg_if! {
+@@ -1,7 +1,14 @@
+ use crate::prelude::*;
+ 
+-pub type blkcnt_t = i32;
+-pub type blksize_t = i32;
++cfg_if! {
++    if #[cfg(all(target_arch = "aarch64", target_os = "horizon"))] {
++        pub type blkcnt_t = c_long;
++        pub type blksize_t = c_long;
++    } else {
++        pub type blkcnt_t = i32;
++        pub type blksize_t = i32;
++    }
++}
+ 
+ cfg_if! {
+     if #[cfg(target_os = "rtems")] {
+@@ -24,6 +31,10 @@ cfg_if! {
          pub type dev_t = u32;
          pub type ino_t = u32;
          pub type off_t = i64;
@@ -13,3 +30,49 @@ index e54aed4..f1a9c28 100644
      } else {
          compile_error!("unsupported target");
      }
+@@ -57,7 +68,13 @@ cfg_if! {
+ 
+ pub type socklen_t = u32;
+ pub type speed_t = u32;
+-pub type suseconds_t = i32;
++cfg_if! {
++    if #[cfg(all(target_arch = "aarch64", target_os = "horizon"))] {
++        pub type suseconds_t = c_long;
++    } else {
++        pub type suseconds_t = i32;
++    }
++}
+ cfg_if! {
+     if #[cfg(target_os = "espidf")] {
+         pub type tcflag_t = u16;
+@@ -413,6 +430,17 @@ cfg_if! {
+         pub const __SIZEOF_PTHREAD_RWLOCK_T: usize = 4;
+         pub const __SIZEOF_PTHREAD_RWLOCKATTR_T: usize = 4;
+         pub const __SIZEOF_PTHREAD_BARRIER_T: usize = 4;
++    } else if #[cfg(all(target_arch = "aarch64", target_os = "horizon"))] {
++        // devkitA64's newlib (Nintendo Switch)
++        const __PTHREAD_INITIALIZER_BYTE: u8 = 0;
++        pub const __SIZEOF_PTHREAD_ATTR_T: usize = 24;
++        pub const __SIZEOF_PTHREAD_MUTEX_T: usize = 12;
++        pub const __SIZEOF_PTHREAD_MUTEXATTR_T: usize = 4;
++        pub const __SIZEOF_PTHREAD_COND_T: usize = 16;
++        pub const __SIZEOF_PTHREAD_CONDATTR_T: usize = 8;
++        pub const __SIZEOF_PTHREAD_RWLOCK_T: usize = 16;
++        pub const __SIZEOF_PTHREAD_RWLOCKATTR_T: usize = 4;
++        pub const __SIZEOF_PTHREAD_BARRIER_T: usize = 20;
+     } else if #[cfg(target_os = "rtems")] {
+         const __PTHREAD_INITIALIZER_BYTE: u8 = 0x00;
+         pub const __SIZEOF_PTHREAD_ATTR_T: usize = 96;
+@@ -578,7 +606,11 @@ pub const O_NONBLOCK: c_int = 16384;
+ 
+ pub const O_ACCMODE: c_int = 3;
+ cfg_if! {
+-    if #[cfg(any(target_os = "espidf", target_os = "rtems"))] {
++    if #[cfg(any(
++        target_os = "espidf",
++        target_os = "rtems",
++        all(target_arch = "aarch64", target_os = "horizon")
++    ))] {
+         pub const O_CLOEXEC: c_int = 0x40000;
+     } else {
+         pub const O_CLOEXEC: c_int = 0x80000;

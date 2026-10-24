@@ -34,9 +34,11 @@ c, rust = values(sys.argv[1]), values(sys.argv[2])
 bad = 0
 for name in sorted(c):
     r = rust.get(name)
-    mark = "ok " if r == c[name] else "ERR"
-    bad += r != c[name]
-    print(f"{mark} {name}: newlib {c[name]}, libc {r}")
+    # pthread types are opaque buffers std only passes to newlib: bigger or more aligned is fine.
+    opaque = name.startswith(("size_pthread_", "align_pthread_")) and name not in ("size_pthread_t", "size_pthread_key_t")
+    good = r is not None and (r >= c[name] if opaque else r == c[name])
+    bad += not good
+    print(f"{'ok ' if good else 'ERR'} {name}: newlib {c[name]}, libc {r}")
 missing = sorted(set(rust) - set(c))
 for name in missing:
     print(f"ERR {name}: only on the Rust side")
