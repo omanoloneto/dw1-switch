@@ -31,6 +31,8 @@
 
 use crate::gpu::{DITHER_TBL, H_MASK, State, Tex, VRAM_H, VRAM_W, Vtx, W_MASK, line_walk, to5};
 
+use std::sync::Arc;
+
 /// Fraction bits of the fixed-point surface positions.
 const SUB: u32 = 4;
 /// Most surfaces kept (the game has two buffers).
@@ -44,12 +46,20 @@ const MAX_QUEUE: usize = 1 << 16;
 /// The mask bit of a surface pixel (the colour is 0x00RRGGBB).
 const MASK: u32 = 1 << 24;
 
-/// A surface: VRAM rect x, y, w, h; `px` is (w * S) x (h * S) pixels, empty until used.
+/// Widescreen margins: at 16:9 and 240 lines the picture is 426.67 PS1 pixels wide, so each side
+/// of the 320 the game draws gets 53 more (whole pixels; the HD surfaces are 426*S wide).
+pub const WIDE_MARGIN: i32 = 53;
+
+/// A surface: VRAM rect x, y, w, h; `px` is ((w + 2 * mx) * S) x (h * S) pixels, empty until
+/// used. `mx` is the widescreen margin in VRAM pixels each side (0 when off): the VRAM rect
+/// sits `mx` pixels in from the surface's left edge, and the margins are never backed by VRAM
+/// (a full-surface fill clears them).
 struct Surf {
     x: i32,
     y: i32,
     w: i32,
     h: i32,
+    mx: i32,
     px: Vec<u32>,
     /// False when the pixels can't be trusted (the 1x VRAM was written behind our back, or a
     /// draw went elsewhere over this rect): the display falls back to the 1x picture, and the
@@ -103,6 +113,8 @@ struct Geo {
     y: i32,
     w: i32,
     h: i32,
+    /// Widescreen margin in VRAM pixels each side (the surface's `mx`).
+    mx: i32,
 }
 
 struct TriCmd {
@@ -123,6 +135,8 @@ struct RectCmd {
     w: i32,
     h: i32,
     tex: Option<Tex>,
+    /// A tile from RAM instead of the VRAM (the widescreen's extra map tile): see `NativeTex`.
+    native: Option<NativeTex>,
     u0: i32,
     v0: i32,
     r: i32,
@@ -130,6 +144,20 @@ struct RectCmd {
     b: i32,
     semi: bool,
     abr: i32,
+}
+
+/// A rectangle textured from a 128x128 8-bit buffer in RAM rather than a VRAM texture page (a
+/// widescreen extra map tile or a clipped repair of its transparent margin pixels). `u0`/`v0`
+/// select the first source texel; the CLUT at `tex.cx, tex.cy` is sampled from live VRAM when the
+/// queue is drawn (so the day/night transition applies). The rest of `tex` supplies the shading
+/// rules; `raw` stays false, as the tile's 0x80 modulation is.
+struct NativeTex {
+    px: Arc<[u8]>,
+    w: i32,
+    h: i32,
+    tex: Tex,
+    u0: i32,
+    v0: i32,
 }
 
 struct LineCmd {
@@ -156,6 +184,8 @@ struct Cmd {
 /// The HD side channel of a `Gpu`.
 pub struct Hd {
     scale: i32,
+    /// Widescreen (an addition): surfaces are `WIDE_MARGIN` VRAM pixels wider on each side.
+    wide: bool,
     surfs: Vec<Surf>,
     queue: Vec<Cmd>,
     threads: usize,
@@ -186,6 +216,7 @@ impl Hd {
     pub fn new(scale: u32, threads: usize) -> Hd {
         Hd {
             scale: scale.clamp(1, 8) as i32,
+            wide: false,
             surfs: Vec::new(),
             queue: Vec::new(),
             threads: if threads == 0 {
@@ -207,6 +238,29 @@ impl Hd {
         self.scale as u32
     }
 
+    /// Widescreen on or off (an addition): the surfaces get `WIDE_MARGIN` VRAM pixels each side
+    /// and the picture read out is 426 wide at 1x. Drops the surfaces (they are made again from
+    /// the VRAM as the game registers them).
+    pub fn set_wide(&mut self, on: bool) {
+        if on == self.wide {
+            return;
+        }
+        self.wide = on;
+        self.queue.clear();
+        self.work = 0;
+        self.surfs.clear();
+        self.tex_seen.clear();
+        self.dirty = false;
+    }
+
+    pub fn wide(&self) -> bool {
+        self.wide
+    }
+
+    fn margin(&self) -> i32 {
+        if self.wide { WIDE_MARGIN } else { 0 }
+    }
+
     /// Full colour on or off for the primitives drawn from now on (call after `flush`).
     pub fn set_full_colour(&mut self, on: bool) {
         self.full = on;
@@ -225,19 +279,35 @@ impl Hd {
     /// Surface pixels from the 1x VRAM (nearest) for the VRAM rect x, y, w, h inside `s`.
     fn copy_from_vram(s: &mut Surf, scale: i32, vram: &[u16], x: i32, y: i32, w: i32, h: i32) {
         let sc = scale as usize;
-        let pitch = s.w as usize * sc;
+        let pitch = (s.w + 2 * s.mx) as usize * sc;
         for j in y..y + h {
             let src = &vram[(j as usize & H_MASK as usize) * VRAM_W..][..VRAM_W];
             let row0 = (j - s.y) as usize * sc * pitch;
             for i in x..x + w {
                 let c = from15(src[i as usize & W_MASK as usize]);
-                let at = row0 + (i - s.x) as usize * sc;
+                let at = row0 + (i - s.x + s.mx) as usize * sc;
                 s.px[at..at + sc].fill(c);
             }
-            let from = row0 + (x - s.x) as usize * sc;
+            let from = row0 + (x - s.x + s.mx) as usize * sc;
             for k in 1..sc {
                 s.px.copy_within(from..from + w as usize * sc, from + k * pitch);
             }
+        }
+    }
+
+    /// Clears a surface's widescreen margins to black: everything in them was drawn by the last
+    /// frame. The VRAM's own rect is untouched.
+    fn clear_margins(s: &mut Surf, scale: i32) {
+        if s.mx == 0 || s.px.is_empty() {
+            return;
+        }
+        let sc = scale as usize;
+        let pitch = (s.w + 2 * s.mx) as usize * sc;
+        let edge = s.mx as usize * sc;
+        for row in 0..s.h as usize * sc {
+            let at = row * pitch;
+            s.px[at..at + edge].fill(0);
+            s.px[at + pitch - edge..at + pitch].fill(0);
         }
     }
 
@@ -245,7 +315,7 @@ impl Hd {
         let scale = self.scale;
         let s = &mut self.surfs[si];
         if s.px.is_empty() {
-            s.px = vec![0; (s.w * scale) as usize * (s.h * scale) as usize];
+            s.px = vec![0; ((s.w + 2 * s.mx) * scale) as usize * (s.h * scale) as usize];
             let (x, y, w, h) = (s.x, s.y, s.w, s.h);
             Self::copy_from_vram(s, scale, vram, x, y, w, h);
         }
@@ -279,6 +349,8 @@ impl Hd {
         if !s.px.is_empty() {
             let (x, y, w, h) = (s.x, s.y, s.w, s.h);
             Self::copy_from_vram(s, scale, vram, x, y, w, h);
+            // The margins came from the last frame's drawing, not from the VRAM.
+            Self::clear_margins(s, scale);
         }
         s.valid = true;
     }
@@ -307,11 +379,13 @@ impl Hd {
         if self.surfs.len() == MAX_SURF {
             self.surfs.remove(0);
         }
+        let mx = self.margin();
         self.surfs.push(Surf {
             x,
             y,
             w,
             h,
+            mx,
             px: Vec::new(),
             valid: true,
         });
@@ -350,6 +424,7 @@ impl Hd {
             y: s.y,
             w: s.w,
             h: s.h,
+            mx: s.mx,
         })
     }
 
@@ -453,7 +528,7 @@ impl Hd {
             if s.px.is_empty() {
                 continue;
             }
-            let pitch = (s.w * scale) as usize;
+            let pitch = ((s.w + 2 * s.mx) * scale) as usize;
             for (k, row) in s.px.chunks_mut(pitch).enumerate() {
                 ps[k % parts].rows[si].push(row);
             }
@@ -530,8 +605,12 @@ impl Hd {
         } else {
             (minx as i64, maxx as i64, miny as i64, maxy as i64)
         };
-        if fx1 < st.clip_x0 as i64
-            || fx0 > st.clip_x1 as i64 + precise as i64
+        // Widescreen: the picture is wider than the game's 320, so a prim wholly in a margin is
+        // still wanted (the 1x path drops it, the margins must not). `hd_clip` keeps the rows at
+        // the draw area and takes the margins off a surface without any.
+        let mx = if self.wide { WIDE_MARGIN as i64 } else { 0 };
+        if fx1 < st.clip_x0 as i64 - mx
+            || fx0 > st.clip_x1 as i64 + precise as i64 + mx
             || fy1 < st.clip_y0 as i64
             || fy0 > st.clip_y1 as i64 + precise as i64
         {
@@ -584,6 +663,7 @@ impl Hd {
                 w,
                 h,
                 tex: tex.copied(),
+                native: None,
                 u0,
                 v0,
                 r,
@@ -591,6 +671,66 @@ impl Hd {
                 b,
                 semi,
                 abr,
+            }),
+        );
+    }
+
+    /// A rectangle textured from a 128x128 8-bit tile in RAM, HD only (`Gpu::plus_tile`): either
+    /// a widescreen extra map tile or a clipped repair of transparent left-margin texels. `uv` is
+    /// the source offset within `px`, and `clut` the VRAM point of its palette.
+    pub(crate) fn native_rect(
+        &mut self,
+        vram: &[u16],
+        st: &State,
+        (x0, y0, w, h): (i32, i32, i32, i32),
+        (cx, cy): (i32, i32),
+        (u0, v0): (i32, i32),
+        px: &[u8],
+    ) {
+        if w <= 0 || h <= 0 || px.len() < (w as usize) * (h as usize) {
+            return;
+        }
+        let Some(geo) = self.target(vram, st) else {
+            return;
+        };
+        // Only the widescreen margin is wanted: nothing when the rectangle ends at or before the
+        // 4:3 picture's left edge (then the game's own columns already fill it, and drawing over
+        // them could only differ in a transition).
+        if x0 + w <= geo.x - geo.mx {
+            return;
+        }
+        self.push(
+            vram,
+            geo,
+            st,
+            Kind::Rect(RectCmd {
+                x0,
+                y0,
+                w,
+                h,
+                tex: None,
+                native: Some(NativeTex {
+                    px: Arc::from(px),
+                    w,
+                    h,
+                    tex: Tex {
+                        mode: 1,
+                        tx: 0,
+                        ty: 0,
+                        cx,
+                        cy,
+                        raw: false,
+                    },
+                    u0,
+                    v0,
+                }),
+                u0: 0,
+                v0: 0,
+                r: 0x80,
+                g: 0x80,
+                b: 0x80,
+                semi: false,
+                abr: 0,
             }),
         );
     }
@@ -650,9 +790,15 @@ impl Hd {
                 if s.px.is_empty() || !s.valid {
                     continue;
                 }
-                let pitch = s.w as usize * sc;
-                let k0 = (fx - s.x) as usize * sc;
-                let k1 = k0 + fw as usize * sc;
+                let pitch = (s.w + 2 * s.mx) as usize * sc;
+                // A fill that spans the surface's whole VRAM width is the frame's clear (or a
+                // fade): it covers the widescreen margins too, just at 1x on the PS1.
+                let (k0, k1) = if px <= s.x && px + pw >= s.x + s.w {
+                    (0, pitch)
+                } else {
+                    let k0 = (fx - s.x + s.mx) as usize * sc;
+                    (k0, k0 + fw as usize * sc)
+                };
                 for j in (fy - s.y) as usize * sc..(fy + fh - s.y) as usize * sc {
                     s.px[j * pitch + k0..j * pitch + k1].fill(from15(c));
                 }
@@ -698,11 +844,23 @@ impl Hd {
         self.ensure(si, vram);
         let sc = self.scale as usize;
         let s = &self.surfs[si];
-        let pitch = s.w as usize * sc;
-        let (ow, oh) = (w as usize * sc, h as usize * sc);
+        let pitch = (s.w + 2 * s.mx) as usize * sc;
+        // Widescreen: the display area is the whole surface rect, so read the whole surface,
+        // margins included. A display area inside a bigger surface is read as it is (no margins
+        // of its own), and the 4:3 picture stays 4:3.
+        let wide = s.mx > 0 && (x, y, w, h) == (s.x, s.y, s.w, s.h);
+        let (ow, oh) = if wide {
+            (pitch, h as usize * sc)
+        } else {
+            (w as usize * sc, h as usize * sc)
+        };
         out.clear();
         out.reserve(ow * oh);
-        let x0 = (x - s.x) as usize * sc;
+        let x0 = if wide {
+            0
+        } else {
+            (x - s.x + s.mx) as usize * sc
+        };
         for j in 0..oh {
             let row = &s.px[((y - s.y) as usize * sc + j) * pitch + x0..][..ow];
             out.extend(row.iter().map(|&c| c & !MASK));
@@ -790,12 +948,23 @@ fn run_part(p: &mut Part, vram: &[u16], queue: &[Cmd]) {
     }
 }
 
-/// Clip rect of the draw area in surface pixels, inclusive, inside the surface.
+/// Clip rect of the draw area in surface pixels, inclusive, inside the surface. Widescreen: the
+/// margins are part of the picture, so horizontally the clip is the whole surface (the game's
+/// own 320-wide clip is what the margins are there to get past); the rows still stop at the
+/// draw area.
 fn hd_clip(st: &State, g: &Geo, scale: i32) -> (i32, i32, i32, i32) {
+    let (x0, x1) = if g.mx > 0 {
+        (0, (g.w + 2 * g.mx) * scale - 1)
+    } else {
+        (
+            ((st.clip_x0 - g.x) * scale).max(0),
+            ((st.clip_x1 + 1 - g.x) * scale - 1).min(g.w * scale - 1),
+        )
+    };
     (
-        ((st.clip_x0 - g.x) * scale).max(0),
+        x0,
         ((st.clip_y0 - g.y) * scale).max(0),
-        ((st.clip_x1 + 1 - g.x) * scale - 1).min(g.w * scale - 1),
+        x1,
         ((st.clip_y1 + 1 - g.y) * scale - 1).min(g.h * scale - 1),
     )
 }
@@ -817,6 +986,17 @@ fn texel(st: &State, vram: &[u16], t: &Tex, u: i32, v: i32) -> u16 {
         }
         _ => at(t.tx + u, y),
     }) as u16
+}
+
+/// The texel at u, v of a `NativeTex`: the tile's byte selects the CLUT entry at the live VRAM
+/// point (outside the tile is transparent, as texel 0 is).
+fn native_texel(vram: &[u16], n: &NativeTex, u: i32, v: i32) -> u16 {
+    if u < 0 || v < 0 || u >= n.w || v >= n.h {
+        return 0;
+    }
+    let index = n.px[((v + n.v0) * 128 + u + n.u0) as usize] as i32;
+    let y = n.tex.cy & H_MASK;
+    vram[(y as usize) * VRAM_W + ((n.tex.cx + index) & W_MASK) as usize]
 }
 
 /// Writes one pixel (r, g, b in 0..31, or out of range when blending follows); the PS1 rules of
@@ -1435,12 +1615,13 @@ fn draw_tri(p: &mut Part, vram: &[u16], c: &Cmd, t: &TriCmd) {
     let mut py = [0i64; 3];
     for i in 0..3 {
         if t.precise {
-            px[i] = ((v[i].px as f64 - g.x as f64) * scale as f64 * (1 << SUB) as f64 + 0.5).floor()
-                as i64;
+            px[i] = ((v[i].px as f64 - g.x as f64 + g.mx as f64) * scale as f64 * (1 << SUB) as f64
+                + 0.5)
+                .floor() as i64;
             py[i] = ((v[i].py as f64 - g.y as f64) * scale as f64 * (1 << SUB) as f64 + 0.5).floor()
                 as i64;
         } else {
-            px[i] = ((v[i].x - g.x) as i64 * sc) << SUB;
+            px[i] = ((v[i].x - g.x + g.mx) as i64 * sc) << SUB;
             py[i] = ((v[i].y - g.y) as i64 * sc) << SUB;
         }
     }
@@ -1567,13 +1748,13 @@ fn draw_tri(p: &mut Part, vram: &[u16], c: &Cmd, t: &TriCmd) {
         let mut x = xl;
         while x <= xr {
             let d = if dith {
-                DITHER_TBL[dy][((bx + g.x) & 3) as usize]
+                DITHER_TBL[dy][((bx + g.x - g.mx) & 3) as usize]
             } else {
                 0
             };
             if let (Some(t1), Some(r1)) = (&tri1x, &row1x) {
                 if sub == 0 || x == xl {
-                    let x1 = bx + g.x;
+                    let x1 = bx + g.x - g.mx;
                     let val = t1.value(r1, x1);
                     (r, gr, b) = (val[0], val[1], val[2]);
                     (u, vv) = (val[3], val[4]);
@@ -1675,8 +1856,8 @@ fn draw_rect(p: &mut Part, vram: &[u16], c: &Cmd, r: &RectCmd) {
     let g = c.geo;
     let (scale, full) = (p.scale, p.full);
     let (cx0, cy0, cx1, cy1) = hd_clip(st, &g, scale);
-    let xs = ((r.x0 - g.x) * scale).max(cx0);
-    let xe = ((r.x0 + r.w - g.x) * scale - 1).min(cx1);
+    let xs = ((r.x0 - g.x + g.mx) * scale).max(cx0);
+    let xe = ((r.x0 + r.w - g.x + g.mx) * scale - 1).min(cx1);
     let ys = ((r.y0 - g.y) * scale).max(cy0);
     let ye = ((r.y0 + r.h - g.y) * scale - 1).min(cy1);
     if ys > ye || xs > xe {
@@ -1691,19 +1872,27 @@ fn draw_rect(p: &mut Part, vram: &[u16], c: &Cmd, r: &RectCmd) {
         let row = p.row(g.si, row_y);
         let mut texel_c = 0i32;
         let mut x = xs;
+        let native = r.native.as_ref();
         while x <= xe {
             // one 1x pixel's columns at a time (the whole row when untextured)
-            let run = if r.tex.is_none() {
+            let run = if r.tex.is_none() && native.is_none() {
                 xe - x + 1
             } else {
                 (scale - x % scale).min(xe - x + 1)
             };
+            let xx = x / scale - g.mx + g.x - r.x0;
             if let Some(t) = r.tex.as_ref() {
-                let xx = x / scale + g.x - r.x0;
                 let u = if st.flip_x { r.u0 - xx } else { r.u0 + xx };
                 texel_c = texel(st, vram, t, u, tv) as i32;
+            } else if let Some(n) = native {
+                let u = if st.flip_x { r.u0 - xx } else { r.u0 + xx };
+                texel_c = native_texel(vram, n, u, tv) as i32;
             }
-            let tc = r.tex.as_ref().map(|t| (t, texel_c));
+            let tc = match (r.tex.as_ref(), native) {
+                (Some(t), _) => Some((t, texel_c)),
+                (None, Some(n)) => Some((&n.tex, texel_c)),
+                (None, None) => None,
+            };
             let at = x as usize;
             match direct(full, st, tc, (r.r, r.g, r.b), r.semi, false, 0) {
                 Some(Some(val)) => row[at..at + run as usize].fill(val),
@@ -1740,7 +1929,7 @@ fn draw_line(p: &mut Part, c: &Cmd, l: &LineCmd) {
     let g = c.geo;
     let (scale, full) = (p.scale, p.full);
     line_walk(st, &l.a, &l.b, l.gouraud, |x, y, r, gr, bl, d| {
-        let (bx, by) = ((x - g.x) * scale, (y - g.y) * scale);
+        let (bx, by) = ((x - g.x + g.mx) * scale, (y - g.y) * scale);
         for yy in by..by + scale {
             if yy % p.parts != p.part {
                 continue;
@@ -1931,6 +2120,95 @@ mod tests {
         gs.read_display_hd(&mut b).unwrap();
         assert!(b.iter().collect::<std::collections::HashSet<_>>().len() > 8);
         let _ = VRAM_W;
+    }
+
+    /// Widescreen: the HD picture is 426 wide at 1x, the game's 4:3 picture centred in it, with
+    /// the margins showing what the game's 320-wide clip hid, cleared by the frame's clear.
+    #[test]
+    fn widescreen_margins_show_what_the_320_wide_clip_hid() {
+        let mut g1 = Gpu::new();
+        let mut gs = Gpu::new();
+        gs.set_scale(S as u32);
+        gs.set_wide(true);
+        let setup = |g: &mut Gpu| {
+            g.gp0(&[
+                0xE300_0000,
+                0xE400_0000 | (239 << 10) | 319,
+                0xE500_0000,
+                0xE100_0000,
+            ]);
+            g.set_display(0, 0, 320, 240, false);
+            g.set_display_enable(true);
+            g.fill(0, 0, 320, 240, 0x30_20_10);
+            // red rectangles the 320-wide clip cuts at both edges (x -40..19 and 300..399)
+            g.gp0(&[
+                0x6000_00FF,
+                100 << 16 | (-40i32 as u32 & 0xFFFF),
+                40 << 16 | 60,
+            ]);
+            g.gp0(&[0x6000_00FF, 100 << 16 | 300, 40 << 16 | 100]);
+        };
+        setup(&mut g1);
+        setup(&mut gs);
+        assert!(g1.vram() == gs.vram(), "the 1x VRAM is the same either way");
+        let (mut one, mut hd) = (vec![0u32; 640 * 480], Vec::new());
+        let (w, h) = g1.read_display(&mut one).unwrap();
+        assert_eq!((w, h), (320, 240));
+        let m: i32 = super::WIDE_MARGIN;
+        let (hw, hh) = gs.read_display_hd(&mut hd).unwrap();
+        assert_eq!((hw, hh), ((320 + 2 * m) as usize * S, 240 * S));
+        // A 1x pixel as the wide picture holds it: 53 to the right of its 1x column.
+        let at = |x: i32, y: i32| hd[(y as usize * S) * hw + (x + m) as usize * S];
+        for y in 0..240 {
+            for x in 0..320 {
+                assert_eq!(at(x, y), one[(y * 320 + x) as usize], "1x pixel ({x}, {y})");
+            }
+        }
+        let red = 0x00ff_0000;
+        let fill_c = one[5 * 320 + 5];
+        assert_eq!(at(-53, 110), fill_c, "the far left of the margin is clear");
+        assert_eq!(
+            at(-5, 110),
+            red,
+            "the left rectangle reaches into the margin"
+        );
+        assert_eq!(at(330, 110), red, "the right rectangle too");
+        assert_eq!(at(372, 110), red, "the widest 1x column");
+        // The frame's clear (a fill across the whole 320) clears the margins too.
+        gs.fill(0, 0, 320, 240, 0x30_20_10);
+        gs.read_display_hd(&mut hd).unwrap();
+        assert_eq!(hd[(110 * S) * hw + (-5 + m) as usize * S], fill_c);
+    }
+
+    /// F10 at runtime: switching widescreen on and off drops the HD surfaces and registers them
+    /// from the VRAM again, so the picture read out changes size (426x240 at 1x, then 320x240)
+    /// while the 1x picture and its pixels stay where they were.
+    #[test]
+    fn widescreen_can_be_toggled_at_runtime() {
+        let mut g = Gpu::new();
+        g.set_scale(S as u32);
+        g.gp0(&[
+            0xE300_0000,
+            0xE400_0000 | (239 << 10) | 319,
+            0xE500_0000,
+            0xE100_0000,
+        ]);
+        g.set_display(0, 0, 320, 240, false);
+        g.set_display_enable(true);
+        g.fill(0, 0, 320, 240, 0x12_34_56);
+        let m = super::WIDE_MARGIN as usize * S;
+        let (narrow, wide) = (320 * S, (320 + 2 * super::WIDE_MARGIN as usize) * S);
+        let mut hd = Vec::new();
+        assert_eq!(g.read_display_hd(&mut hd), Some((narrow, 240 * S)));
+        let at_1x = hd[(100 * S) * narrow + 50 * S];
+        g.set_wide(true);
+        assert_eq!(g.read_display_hd(&mut hd), Some((wide, 240 * S)));
+        assert_eq!(hd[(100 * S) * wide + 50 * S + m], at_1x);
+        g.set_wide(false);
+        assert_eq!(g.read_display_hd(&mut hd), Some((narrow, 240 * S)));
+        assert_eq!(hd[(100 * S) * narrow + 50 * S], at_1x);
+        let mut one = vec![0u32; 320 * 240];
+        assert_eq!(g.read_display(&mut one), Some((320, 240)));
     }
 
     #[test]

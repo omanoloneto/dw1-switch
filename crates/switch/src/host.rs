@@ -20,7 +20,9 @@ mod button {
     pub const X: u64 = 1 << 2;
     pub const Y: u64 = 1 << 3;
     pub const STICK_R: u64 = 1 << 5;
+    pub const LEFT: u64 = 1 << 12;
     pub const UP: u64 = 1 << 13;
+    pub const RIGHT: u64 = 1 << 14;
     pub const DOWN: u64 = 1 << 15;
 }
 
@@ -77,7 +79,8 @@ impl FrameStats {
 }
 
 impl SwitchHost {
-    /// R3 held with Up/Down steps the render scale, with Y toggles no wobble, with X full colour.
+    /// R3 held with Up/Down steps the render scale, with Y toggles no wobble, with X full colour,
+    /// with Left/Right widescreen.
     fn handle_combos(&mut self, held: u64) {
         let pressed = held & !self.held;
         self.held = held;
@@ -97,6 +100,9 @@ impl SwitchHost {
         if pressed & button::X != 0 {
             self.settings.full_colour = !self.settings.full_colour;
         }
+        if pressed & (button::LEFT | button::RIGHT) != 0 {
+            self.settings.widescreen = !self.settings.widescreen;
+        }
         if self.settings != before {
             self.settings.save(&self.settings_path);
             platform::note(&self.settings.describe());
@@ -115,14 +121,15 @@ impl psyq::libetc::Host for SwitchHost {
         }
         self.handle_combos(platform::buttons());
         self.settings.apply();
-        let shown = psyq::gpu::with(|g| {
-            if g.scale() > 1 {
+        let (shown, scale) = psyq::gpu::with(|g| {
+            let shown = if g.scale() > 1 {
                 g.read_display_hd(&mut self.frame)
             } else {
                 g.read_display(&mut self.frame)
-            }
+            };
+            (shown, g.scale())
         });
-        platform::present(shown.map(|(w, h)| (&self.frame[..w * h], w, h)));
+        platform::present(shown.map(|(w, h)| (&self.frame[..w * h], w, h)), scale);
         self.stats.add(work, started.elapsed(), self.settings.scale);
     }
 

@@ -11,6 +11,7 @@ pub struct Settings {
     pub scale: u32,
     pub no_wobble: bool,
     pub full_colour: bool,
+    pub widescreen: bool,
 }
 
 impl Default for Settings {
@@ -19,6 +20,7 @@ impl Default for Settings {
             scale: 1,
             no_wobble: true,
             full_colour: true,
+            widescreen: false,
         }
     }
 }
@@ -59,6 +61,7 @@ impl Settings {
             },
             "no_wobble" => self.no_wobble = flag()?,
             "full_colour" => self.full_colour = flag()?,
+            "widescreen" => self.widescreen = flag()?,
             _ => return Err(format!("unknown setting {key:?}")),
         }
         Ok(())
@@ -67,9 +70,9 @@ impl Settings {
     pub fn save(&self, path: &Path) {
         let text = format!(
             "# Digimon World on the Switch. Hold R3 (click the right stick) and press:\n\
-             #   Up/Down: render scale, Y: no wobble, X: full colour.\n\
-             render_scale = {}\nno_wobble = {}\nfull_colour = {}\n",
-            self.scale, self.no_wobble, self.full_colour
+             #   Up/Down: render scale, Y: no wobble, X: full colour, Left/Right: widescreen.\n\
+             render_scale = {}\nno_wobble = {}\nfull_colour = {}\nwidescreen = {}\n",
+            self.scale, self.no_wobble, self.full_colour, self.widescreen
         );
         if let Err(e) = psyq::libmcrd::write_atomic(path, text.as_bytes()) {
             eprintln!("dw1: {}: {e}", path.display());
@@ -96,6 +99,11 @@ impl Settings {
             if g.full_colour() != self.full_colour {
                 g.set_full_colour(self.full_colour);
             }
+            // The margins live on the HD surfaces, so widescreen waits for scale 2x and up.
+            let wide = self.scale > 1 && self.widescreen;
+            if g.wide() != wide {
+                g.set_wide(wide);
+            }
         });
         let wobble_off = self.scale > 1 && self.no_wobble;
         if backend::pgxp::enabled() != wobble_off {
@@ -103,14 +111,20 @@ impl Settings {
         }
     }
 
-    /// The line the corner note shows after a change.
+    /// The line the corner note shows after a change. No wobble, full colour and widescreen draw
+    /// on the HD surfaces, so at 1x the note says they wait for a higher scale.
     pub fn describe(&self) -> String {
         let on = |b: bool| if b { "on" } else { "off" };
-        format!(
-            "Scale {}x  No wobble {}  Full colour {}",
-            self.scale,
+        let extras = format!(
+            "No wobble {}  Full colour {}  Wide {}",
             on(self.no_wobble),
-            on(self.full_colour)
-        )
+            on(self.full_colour),
+            on(self.widescreen)
+        );
+        if self.scale > 1 {
+            format!("Scale {}x  {extras}", self.scale)
+        } else {
+            format!("Scale 1x (original)  {extras}: from 2x")
+        }
     }
 }

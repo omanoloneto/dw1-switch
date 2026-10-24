@@ -132,15 +132,24 @@ void dw1_platform_note(const char *text)
 	note_until = SDL_GetTicks() + 2000;
 }
 
-/* The PS1's picture is always shown at 4:3, whatever the video mode's resolution. */
-static SDL_Rect picture_rect(void)
+/*
+ * Where a w x h picture showing `lines` of the PS1's display goes. A TV shows any PS1 mode across
+ * its whole 4:3 width, and the widescreen's HD pictures (426:240) at 16:9; the full height is 240
+ * lines (480 interlaced), so a movie's 176 keep their place in it. A whole multiple that fills the
+ * box (320x240 at 3, the widescreen's 1278x720) is shown pixel for pixel.
+ */
+static SDL_Rect picture_rect(int w, int h, int lines)
 {
-	int h = SCREEN_H;
-	int w = h * 4 / 3;
-	return (SDL_Rect){ (SCREEN_W - w) / 2, 0, w, h };
+	bool wide = w * 240 == h * 426;
+	int box_w = wide ? SCREEN_W : SCREEN_H * 4 / 3;
+	int field = lines > 256 ? 480 : 240;
+	int box_h = lines >= field ? SCREEN_H : SCREEN_H * lines / field;
+	if (box_h == SCREEN_H && SCREEN_H % h == 0 && abs(w * (SCREEN_H / h) - box_w) <= 2)
+		box_w = w * (SCREEN_H / h);
+	return (SDL_Rect){ (SCREEN_W - box_w) / 2, (SCREEN_H - box_h) / 2, box_w, box_h };
 }
 
-static void ensure_texture(int w, int h)
+static void ensure_texture(int w, int h, const SDL_Rect *dst)
 {
 	if (texture && texture_w == w && texture_h == h)
 		return;
@@ -149,20 +158,19 @@ static void ensure_texture(int w, int h)
 	texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGB888, SDL_TEXTUREACCESS_STREAMING, w, h);
 	texture_w = w;
 	texture_h = h;
-	SDL_Rect dst = picture_rect();
-	bool whole = dst.w % w == 0 && dst.h % h == 0;
+	bool whole = dst->w % w == 0 && dst->h % h == 0;
 	SDL_SetTextureScaleMode(texture, whole ? SDL_ScaleModeNearest : SDL_ScaleModeLinear);
 }
 
-void dw1_platform_present(const uint32_t *pixels, int w, int h)
+void dw1_platform_present(const uint32_t *pixels, int w, int h, int lines)
 {
 	SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
 	SDL_RenderClear(renderer);
 	if (pixels) {
-		ensure_texture(w, h);
+		SDL_Rect dst = picture_rect(w, h, lines);
+		ensure_texture(w, h, &dst);
 		if (texture) {
 			SDL_UpdateTexture(texture, NULL, pixels, w * (int)sizeof(uint32_t));
-			SDL_Rect dst = picture_rect();
 			SDL_RenderCopy(renderer, texture, NULL, &dst);
 		}
 	}

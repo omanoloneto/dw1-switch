@@ -19,3 +19,18 @@ pub fn set_pc_saves(on: bool) {
 pub fn pc_saves() -> bool {
     dw1_pc_saves.load(Ordering::Relaxed) != 0
 }
+
+/// `dw1_plus_margin` (`crates/decomp-c/include/dw1_native.h`): the HD picture's widescreen
+/// margin in VRAM pixels each side, 0 when it is off. `psyq::gpu::with` keeps it current, so the
+/// game C can ask without taking the GPU lock (and without risking a deadlock inside a `with`).
+static WIDESCREEN_MARGIN: AtomicI32 = AtomicI32::new(0);
+
+#[unsafe(no_mangle)]
+pub extern "C" fn dw1_plus_margin() -> i32 {
+    WIDESCREEN_MARGIN.load(Ordering::Relaxed)
+}
+
+/// Sets what `dw1_plus_margin` returns (`psyq::gpu::with`).
+pub fn set_widescreen_margin(margin: i32) {
+    WIDESCREEN_MARGIN.store(margin, Ordering::Relaxed);
+}

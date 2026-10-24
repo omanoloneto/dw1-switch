@@ -14,6 +14,14 @@
 #define DW1_NATIVE 1
 
 /*
+ * DW1_PLUS: additions the native app makes to the game that the PS1 never had (the widescreen's
+ * draw-only culling and the extra map tile column). The PS1 build never defines it, so the
+ * oracle replays run the vanilla game; every addition is also off at run time unless the HD
+ * widescreen picture is on (`dw1_plus_margin`).
+ */
+#define DW1_PLUS 1
+
+/*
  * The host's fixed-width types, read before `long` is redefined below so that intptr_t,
  * uintptr_t, int64_t and friends keep their native widths. dw/types.h includes <stdint.h>
  * again later; its include guard makes that a no-op.
@@ -64,6 +72,28 @@ void dw1_overlay_reset(int32_t lib);
 /* Nonzero when the game's save screens use the Mac app's save slots instead of memory cards
  * (crates/psyq/src/native.rs; the decomp's main_menu.c, Phase 7). */
 extern int32_t dw1_pc_saves;
+
+/*
+ * The HD picture's widescreen margin in VRAM pixels each side: 0 when it is off (no HD surfaces,
+ * or F10 off), `backend::hd::WIDE_MARGIN` (53) when on (crates/psyq/src/native.rs, kept current
+ * by `psyq::gpu::with`). Draw-only code widens its culling by it; the game's own visibility
+ * flags, its simulation and the RNG are never touched.
+ */
+int32_t dw1_plus_margin(void);
+
+/*
+ * Nonzero when `renderDigimon` drew that entity (`Entity *`) in the last frame, the widescreen
+ * margin included, and the margins are on. The animation script's sounds ask it, so a digimon
+ * walking in a margin is heard like one at the 4:3 picture's edge (decomp main/anim.c).
+ */
+int32_t dw1_plus_wide_drawn(void *entity);
+
+/*
+ * The map tile pixels captured for the extra widescreen column: 128*128 bytes a tile, row-major,
+ * in map order (decomp map.c's setupMap; crates/psyq/src/gpu.rs draws the tiles). The buffer must
+ * stay valid for the process (it is a static array).
+ */
+void dw1_plus_set_tile_pixels(const uint8_t *pixels);
 
 /* Nonzero: the GTE projections that follow place a 2D picture (HUD text, menu glyphs), so the
  * no-wobble option keeps their integer corners; zero: back to 3D (crates/psyq/src/gte.rs). */

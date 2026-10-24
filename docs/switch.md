@@ -55,8 +55,11 @@ Hold **R3** (click the right stick, which the PS1 pad doesn't have; the game see
 | R3 + Up / Down | Render scale | 1x (the PS1's picture), 2x, 3x (fills 720p) |
 | R3 + Y | No wobble (3D at the GTE's precise positions; scale 2x and up) | on / off |
 | R3 + X | Full colour (8 bits a channel, no dither; scale 2x and up) | on / off |
+| R3 + Left / Right | Widescreen (16:9 margins on the HD picture; scale 2x and up) | on / off |
 
-A note in the corner shows the new settings, and they're kept in `sdmc:/switch/dw1/settings.txt` (the Mac app's keys: `render_scale`, `no_wobble`, `full_colour`). The HD picture is drawn on the CPU; its drawing threads run on cores 1 and 2 (`switch/source/threads.c`), the game on core 0.
+Widescreen is [dw1-linux](https://github.com/oarsc/dw1-linux)'s (by oarsc): the HD surfaces get 53 VRAM pixels on each side, the map's neighbouring tile columns and the actors the game culled are drawn into them, fades and the pause dim cover them, and the HUD hugs the wider picture's edges. The game's own calculations, its RNG and the 1x picture are untouched. Title screens, menus and movies stay 4:3, and map edges with no art beyond them show black. At 3x the 16:9 picture is 1278x720, pixel for pixel on the Switch's screen. Its decomp side, with dw1-linux's native fixes (PS1 division by zero, the texture loading order, an empty map tile), is on the `dw1-switch` branch of [omanoloneto/dw_decomp](https://github.com/omanoloneto/dw_decomp), this repo's `decomp` submodule.
+
+A note in the corner shows the new settings, and they're kept in `sdmc:/switch/dw1/settings.txt` (the Mac app's keys: `render_scale`, `no_wobble`, `full_colour`, plus `widescreen`). The HD picture is drawn on the CPU; its drawing threads run on cores 1 and 2 (`switch/source/threads.c`), the game on core 0.
 
 ## Don't distribute builds
 

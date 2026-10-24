@@ -5,7 +5,7 @@ use std::ffi::{CString, c_char};
 unsafe extern "C" {
     fn dw1_platform_init(audio_hz: u32) -> i32;
     fn dw1_platform_pump() -> bool;
-    fn dw1_platform_present(pixels: *const u32, w: i32, h: i32);
+    fn dw1_platform_present(pixels: *const u32, w: i32, h: i32, lines: i32);
     fn dw1_platform_pad() -> u32;
     fn dw1_platform_buttons() -> u64;
     fn dw1_platform_note(text: *const c_char);
@@ -25,14 +25,15 @@ pub fn pump() -> bool {
     unsafe { dw1_platform_pump() }
 }
 
-/// `None` while the PS1's display is off.
-pub fn present(frame: Option<(&[u32], usize, usize)>) {
+/// A `w` x `h` picture of the PS1 display's `scale` times, or `None` while the display is off.
+pub fn present(frame: Option<(&[u32], usize, usize)>, scale: u32) {
     match frame {
         Some((pixels, w, h)) => {
             assert!(pixels.len() >= w * h);
-            unsafe { dw1_platform_present(pixels.as_ptr(), w as i32, h as i32) }
+            let lines = (h / scale.max(1) as usize) as i32;
+            unsafe { dw1_platform_present(pixels.as_ptr(), w as i32, h as i32, lines) }
         }
-        None => unsafe { dw1_platform_present(std::ptr::null(), 0, 0) },
+        None => unsafe { dw1_platform_present(std::ptr::null(), 0, 0, 0) },
     }
 }
 
