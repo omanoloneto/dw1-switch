@@ -33,6 +33,11 @@ use crate::gpu::{DITHER_TBL, H_MASK, State, Tex, VRAM_H, VRAM_W, Vtx, W_MASK, li
 
 use std::sync::Arc;
 
+#[path = "hd_gl.rs"]
+mod gl_draw;
+pub use gl_draw::GlPicture;
+use gl_draw::{GlHd, GlSurf};
+
 /// Fraction bits of the fixed-point surface positions.
 const SUB: u32 = 4;
 /// Most surfaces kept (the game has two buffers).
@@ -65,6 +70,8 @@ struct Surf {
     /// draw went elsewhere over this rect): the display falls back to the 1x picture, and the
     /// surface is rebuilt from the VRAM when it is registered again or at the next primitive.
     valid: bool,
+    /// The pixels on the GPU instead of in `px`, when the surfaces are drawn there.
+    gl: Option<GlSurf>,
 }
 
 impl Surf {
@@ -201,6 +208,8 @@ pub struct Hd {
     /// Debug guard: the texture page and CLUT rects of the queued commands, and whether it fired.
     tex_seen: Vec<[i32; 4]>,
     warned: bool,
+    /// Drawn by the GPU (`hd_gl.rs`) instead of the CPU.
+    gl: Option<Box<GlHd>>,
 }
 
 /// The default number of drawing threads: one per logical core, at most 8.
@@ -231,7 +240,28 @@ impl Hd {
             dirty: false,
             tex_seen: Vec::new(),
             warned: false,
+            gl: None,
         }
+    }
+
+    /// Draws the surfaces on the GPU (`true`: an OpenGL 3.3 core context is current on this
+    /// thread and `gl::init` has loaded it) or on the CPU. Drops the surfaces, which are made
+    /// again from the VRAM as the game registers them.
+    pub fn set_gpu(&mut self, on: bool) -> Result<(), String> {
+        if on == self.gl.is_some() {
+            return Ok(());
+        }
+        self.queue.clear();
+        self.work = 0;
+        self.surfs.clear();
+        self.tex_seen.clear();
+        self.dirty = false;
+        self.gl = if on { Some(Box::new(GlHd::new()?)) } else { None };
+        Ok(())
+    }
+
+    pub fn gpu(&self) -> bool {
+        self.gl.is_some()
     }
 
     pub fn scale(&self) -> u32 {
@@ -313,6 +343,16 @@ impl Hd {
 
     fn ensure(&mut self, si: usize, vram: &[u16]) {
         let scale = self.scale;
+        if let Some(gl) = self.gl.as_deref() {
+            let s = &mut self.surfs[si];
+            if s.gl.is_none() {
+                let gs = gl.surface((s.w + 2 * s.mx) * scale, s.h * scale);
+                gl.upload_vram(vram);
+                gl.copy_from_vram(s, &gs, scale, (s.x, s.y, s.w, s.h));
+                s.gl = Some(gs);
+            }
+            return;
+        }
         let s = &mut self.surfs[si];
         if s.px.is_empty() {
             s.px = vec![0; ((s.w + 2 * s.mx) * scale) as usize * (s.h * scale) as usize];
@@ -338,6 +378,9 @@ impl Hd {
             return;
         }
         self.dirty = false;
+        if let Some(gl) = self.gl.as_deref() {
+            gl.upload_vram(vram);
+        }
         for si in 0..self.surfs.len() {
             self.rebuild(si, vram);
         }
@@ -345,6 +388,20 @@ impl Hd {
 
     fn rebuild(&mut self, si: usize, vram: &[u16]) {
         let scale = self.scale;
+        if let Some(gl) = self.gl.as_deref() {
+            // (the VRAM is on the GPU already: `revalidate` and `register` upload it)
+            let s = &mut self.surfs[si];
+            if let Some(gs) = s.gl.as_ref() {
+                gl.copy_from_vram(s, gs, scale, (s.x, s.y, s.w, s.h));
+                if s.mx > 0 {
+                    let (edge, right) = (s.mx * scale, (s.mx + s.w) * scale);
+                    gl.fill(gs, (0, 0, edge, gs.h), 0, false);
+                    gl.fill(gs, (right, 0, edge, gs.h), 0, false);
+                }
+            }
+            s.valid = true;
+            return;
+        }
         let s = &mut self.surfs[si];
         if !s.px.is_empty() {
             let (x, y, w, h) = (s.x, s.y, s.w, s.h);
@@ -371,6 +428,9 @@ impl Hd {
         self.flush(vram);
         if let Some(si) = self.surfs.iter().position(|s| s.contains(x, y, w, h)) {
             if !self.surfs[si].valid {
+                if let Some(gl) = self.gl.as_deref() {
+                    gl.upload_vram(vram);
+                }
                 self.rebuild(si, vram);
             }
             return;
@@ -388,6 +448,7 @@ impl Hd {
             mx,
             px: Vec::new(),
             valid: true,
+            gl: None,
         });
         self.ensure(self.surfs.len() - 1, vram);
     }
@@ -505,6 +566,15 @@ impl Hd {
     pub fn flush(&mut self, vram: &[u16]) {
         self.revalidate(vram);
         if self.queue.is_empty() {
+            return;
+        }
+        if let Some(gl) = self.gl.as_deref_mut() {
+            let started = std::time::Instant::now();
+            gl.flush(vram, &self.surfs, &self.queue, self.scale, self.full);
+            self.queue.clear();
+            self.tex_seen.clear();
+            self.work = 0;
+            self.flush_ns += started.elapsed().as_nanos() as u64;
             return;
         }
         let parts = if self.work < PARALLEL_WORK {
@@ -787,6 +857,20 @@ impl Hd {
                 let Some((fx, fy, fw, fh)) = Self::clip_rect(s, px, py, pw, ph) else {
                     continue;
                 };
+                if let (Some(gl), Some(gs)) = (self.gl.as_deref(), s.gl.as_ref()) {
+                    if !s.valid {
+                        continue;
+                    }
+                    let sc = sc as i32;
+                    let (k0, k1) = if px <= s.x && px + pw >= s.x + s.w {
+                        (0, gs.w)
+                    } else {
+                        let k0 = (fx - s.x + s.mx) * sc;
+                        (k0, k0 + fw * sc)
+                    };
+                    gl.fill(gs, (k0, (fy - s.y) * sc, k1 - k0, fh * sc), rgb15(c), c & 0x8000 != 0);
+                    continue;
+                }
                 if s.px.is_empty() || !s.valid {
                     continue;
                 }
@@ -811,10 +895,21 @@ impl Hd {
     pub fn refresh(&mut self, vram: &[u16], x: i32, y: i32, w: i32, h: i32) {
         let scale = self.scale;
         for (px, py, pw, ph) in pieces(x, y, w, h) {
+            let mut uploaded = false;
             for s in &mut self.surfs {
                 let Some((fx, fy, fw, fh)) = Self::clip_rect(s, px, py, pw, ph) else {
                     continue;
                 };
+                if let (Some(gl), Some(gs)) = (self.gl.as_deref(), s.gl.as_ref()) {
+                    if s.valid {
+                        if !uploaded {
+                            gl.upload_vram_rect(vram, (px, py, pw, ph));
+                            uploaded = true;
+                        }
+                        gl.copy_from_vram(s, gs, scale, (fx, fy, fw, fh));
+                    }
+                    continue;
+                }
                 if s.px.is_empty() || !s.valid {
                     continue;
                 }
@@ -861,11 +956,46 @@ impl Hd {
         } else {
             (x - s.x + s.mx) as usize * sc
         };
+        if let (Some(gl), Some(gs)) = (self.gl.as_deref(), s.gl.as_ref()) {
+            let rect = (x0 as i32, (y - s.y) * sc as i32, ow as i32, oh as i32);
+            gl.read(gs, rect, out);
+            return Some((ow, oh));
+        }
         for j in 0..oh {
             let row = &s.px[((y - s.y) as usize * sc + j) * pitch + x0..][..ow];
             out.extend(row.iter().map(|&c| c & !MASK));
         }
         Some((ow, oh))
+    }
+
+    /// `read_display` without the copy, for a host that shows the GPU's surface itself: where the
+    /// picture is in which texture. None when the surfaces aren't on the GPU or none holds it.
+    pub fn display_gl(&mut self, vram: &[u16], x: i32, y: i32, w: i32, h: i32) -> Option<GlPicture> {
+        self.gl.as_ref()?;
+        self.flush(vram);
+        let si = self
+            .surfs
+            .iter()
+            .position(|s| s.valid && s.contains(x, y, w, h))?;
+        self.ensure(si, vram);
+        let sc = self.scale;
+        let s = &self.surfs[si];
+        let gs = s.gl.as_ref()?;
+        let wide = s.mx > 0 && (x, y, w, h) == (s.x, s.y, s.w, s.h);
+        let (px, pw) = if wide {
+            (0, gs.w)
+        } else {
+            ((x - s.x + s.mx) * sc, w * sc)
+        };
+        Some(GlPicture {
+            tex: gs.tex,
+            x: px,
+            y: (y - s.y) * sc,
+            w: pw,
+            h: h * sc,
+            tex_w: gs.w,
+            tex_h: gs.h,
+        })
     }
 }
 

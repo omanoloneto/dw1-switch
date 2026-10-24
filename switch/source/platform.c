@@ -36,17 +36,14 @@ enum {
 enum { SCREEN_W = 1280, SCREEN_H = 720 };
 
 static SDL_Window *window;
-static SDL_Renderer *renderer;
-static SDL_Texture *texture;
-static int texture_w, texture_h;
+static SDL_GLContext context;
 static SDL_AudioDeviceID audio;
 static Uint32 audio_max_queued;
 static PadState pad;
 static u64 held;
-static SDL_Texture *note;
-static int note_w, note_h;
-static Uint32 note_until;
 
+/* The window with an OpenGL 3.3 core context (mesa) current on this thread, which draws and shows
+ * the picture (crates/switch/src/video.rs). */
 int dw1_platform_init(uint32_t audio_hz)
 {
 	padConfigureInput(1, HidNpadStyleSet_NpadStandard);
@@ -55,13 +52,19 @@ int dw1_platform_init(uint32_t audio_hz)
 	if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0)
 		return -1;
 	atexit(SDL_Quit);
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+	SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 0);
+	SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 0);
 	window = SDL_CreateWindow("Digimon World", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-				  SCREEN_W, SCREEN_H, SDL_WINDOW_FULLSCREEN);
+				  SCREEN_W, SCREEN_H, SDL_WINDOW_FULLSCREEN | SDL_WINDOW_OPENGL);
 	if (!window)
 		return -1;
-	renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-	if (!renderer)
+	context = SDL_GL_CreateContext(window);
+	if (!context)
 		return -1;
+	SDL_GL_SetSwapInterval(1);
 
 	SDL_AudioSpec want = {
 		.freq = (int)audio_hz,
@@ -76,6 +79,22 @@ int dw1_platform_init(uint32_t audio_hz)
 		SDL_PauseAudioDevice(audio, 0);
 	}
 	return 0;
+}
+
+const char *dw1_platform_error(void)
+{
+	return SDL_GetError();
+}
+
+void *dw1_platform_gl_proc(const char *name)
+{
+	return SDL_GL_GetProcAddress(name);
+}
+
+/* Shows what was drawn, at the next vsync. */
+void dw1_platform_swap(void)
+{
+	SDL_GL_SwapWindow(window);
 }
 
 /* Events, and the controllers' state for this VBlank: the PS1 also read its pads once a field. */
@@ -97,28 +116,30 @@ uint64_t dw1_platform_buttons(void)
 }
 
 /*
- * The system's boost mode (CPU at 1785 MHz instead of 1020, GPU at its minimum, which one textured
- * quad a frame doesn't notice): the HD picture is drawn on the CPU. Only applications have it, so
- * it fails quietly when the homebrew runs as an applet.
+ * The system's boost mode (CPU at 1785 MHz instead of 1020, GPU at its minimum): for the HD
+ * picture drawn on the CPU, when OpenGL can't. Only applications have it, so it fails quietly when
+ * the homebrew runs as an applet.
  */
 void dw1_platform_boost(bool on)
 {
 	appletSetCpuBoostMode(on ? ApmCpuBoostMode_FastLoad : ApmCpuBoostMode_Normal);
 }
 
-/* A line of text in the picture's corner for two seconds, in libnx's 16x16 console font. */
-void dw1_platform_note(const char *text)
+/*
+ * A line of text as 0xAARRGGBB pixels, light on dark, in libnx's 16x16 console font, into `out`
+ * (room for `cap` pixels). 0 with its size in `w` and `h`, or -1 when it doesn't fit.
+ */
+int dw1_platform_text(const char *text, uint32_t *out, size_t cap, int *w, int *h)
 {
 	enum { GLYPH = 16, PAD = 8, MAX_CHARS = 72 };
 	const ConsoleFont *font = &consoleGetDefault()->font;
 	int len = (int)strnlen(text, MAX_CHARS);
-	int w = len * GLYPH + 2 * PAD;
-	int h = GLYPH + 2 * PAD;
-	Uint32 *px = malloc((size_t)w * h * sizeof(Uint32));
-	if (!px)
-		return;
-	for (int i = 0; i < w * h; i++)
-		px[i] = 0xFF10121A;
+	*w = len * GLYPH + 2 * PAD;
+	*h = GLYPH + 2 * PAD;
+	if ((size_t)*w * (size_t)*h > cap)
+		return -1;
+	for (int i = 0; i < *w * *h; i++)
+		out[i] = 0xFF10121A;
 	for (int k = 0; k < len; k++) {
 		int c = (unsigned char)text[k] - font->asciiOffset;
 		if (c < 0 || c >= font->numChars)
@@ -127,68 +148,11 @@ void dw1_platform_note(const char *text)
 		for (int y = 0; y < GLYPH; y++) {
 			for (int x = 0; x < GLYPH; x++) {
 				if (glyph[y] & (0x8000 >> x))
-					px[(PAD + y) * w + PAD + k * GLYPH + x] = 0xFFEBEEF5;
+					out[(PAD + y) * *w + PAD + k * GLYPH + x] = 0xFFEBEEF5;
 			}
 		}
 	}
-	if (note)
-		SDL_DestroyTexture(note);
-	note = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, w, h);
-	if (note)
-		SDL_UpdateTexture(note, NULL, px, w * (int)sizeof(Uint32));
-	free(px);
-	note_w = w;
-	note_h = h;
-	note_until = SDL_GetTicks() + 2000;
-}
-
-/*
- * Where a w x h picture showing `lines` of the PS1's display goes. A TV shows any PS1 mode across
- * its whole 4:3 width, and the widescreen's HD pictures (426:240) at 16:9; the full height is 240
- * lines (480 interlaced), so a movie's 176 keep their place in it. A whole multiple that fills the
- * box (320x240 at 3, the widescreen's 1278x720) is shown pixel for pixel.
- */
-static SDL_Rect picture_rect(int w, int h, int lines)
-{
-	bool wide = w * 240 == h * 426;
-	int box_w = wide ? SCREEN_W : SCREEN_H * 4 / 3;
-	int field = lines > 256 ? 480 : 240;
-	int box_h = lines >= field ? SCREEN_H : SCREEN_H * lines / field;
-	if (box_h == SCREEN_H && SCREEN_H % h == 0 && abs(w * (SCREEN_H / h) - box_w) <= 2)
-		box_w = w * (SCREEN_H / h);
-	return (SDL_Rect){ (SCREEN_W - box_w) / 2, (SCREEN_H - box_h) / 2, box_w, box_h };
-}
-
-static void ensure_texture(int w, int h, const SDL_Rect *dst)
-{
-	if (texture && texture_w == w && texture_h == h)
-		return;
-	if (texture)
-		SDL_DestroyTexture(texture);
-	texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGB888, SDL_TEXTUREACCESS_STREAMING, w, h);
-	texture_w = w;
-	texture_h = h;
-	bool whole = dst->w % w == 0 && dst->h % h == 0;
-	SDL_SetTextureScaleMode(texture, whole ? SDL_ScaleModeNearest : SDL_ScaleModeLinear);
-}
-
-void dw1_platform_present(const uint32_t *pixels, int w, int h, int lines)
-{
-	SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-	SDL_RenderClear(renderer);
-	if (pixels) {
-		SDL_Rect dst = picture_rect(w, h, lines);
-		ensure_texture(w, h, &dst);
-		if (texture) {
-			SDL_UpdateTexture(texture, NULL, pixels, w * (int)sizeof(uint32_t));
-			SDL_RenderCopy(renderer, texture, NULL, &dst);
-		}
-	}
-	if (note && !SDL_TICKS_PASSED(SDL_GetTicks(), note_until)) {
-		SDL_Rect corner = { 24, 24, note_w, note_h };
-		SDL_RenderCopy(renderer, note, NULL, &corner);
-	}
-	SDL_RenderPresent(renderer);
+	return 0;
 }
 
 /* Buttons by position, as on the PS1 pad: the bottom one is Cross, the right one is Circle. */

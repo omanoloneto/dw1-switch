@@ -95,7 +95,8 @@ impl Settings {
         psyq::gpu::with(|g| {
             if g.scale() != self.scale {
                 g.set_scale(self.scale);
-                crate::platform::boost(self.scale > 1);
+                // the boost lowers the GPU's clock: only for HD surfaces the CPU draws
+                crate::platform::boost(self.scale > 1 && !g.hd_gpu());
             }
             if g.full_colour() != self.full_colour {
                 g.set_full_colour(self.full_colour);

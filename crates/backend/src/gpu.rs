@@ -33,7 +33,7 @@
 //! textured ones only where the texel's bit 15 is set; modulation is texel * colour / 16 per
 //! channel (0x80 = unchanged), clamped. Pixel format: PS1 15-bit BGR plus the mask bit.
 
-use crate::hd::Hd;
+use crate::hd::{GlPicture, Hd};
 
 /// VRAM width in pixels.
 pub const VRAM_W: usize = 1024;
@@ -234,6 +234,8 @@ pub struct Gpu {
     hd: Option<Box<Hd>>,
     hd_threads: usize,
     hd_full: bool,
+    /// The HD surfaces are drawn by OpenGL (`hd_gl.rs`) instead of the CPU.
+    hd_gpu: bool,
     /// Widescreen (an addition, HD surfaces only): the picture is 426 wide at 1x.
     wide: bool,
 }
@@ -256,6 +258,7 @@ impl Gpu {
             hd: None,
             hd_threads: 0,
             hd_full: false,
+            hd_gpu: false,
             wide: false,
         };
         g.reset(true);
@@ -1220,9 +1223,31 @@ impl Gpu {
         });
         if let Some(hd) = self.hd.as_deref_mut() {
             hd.set_full_colour(self.hd_full);
+            if self.hd_gpu
+                && let Err(e) = hd.set_gpu(true)
+            {
+                eprintln!("backend: the GPU can't draw the HD surfaces, the CPU will: {e}");
+                self.hd_gpu = false;
+            }
         }
         self.hd_register_draw_area();
         self.hd_register_display();
+    }
+
+    /// Draws the HD surfaces with OpenGL instead of the CPU, at this scale and the next ones.
+    /// Needs an OpenGL 3.3 core context current on the thread driving the GPU, loaded with
+    /// `gl::init`. On an error the CPU keeps drawing them.
+    pub fn set_hd_gpu(&mut self, on: bool) -> Result<(), String> {
+        self.hd_sync();
+        let r = self.hd.as_deref_mut().map_or(Ok(()), |hd| hd.set_gpu(on));
+        self.hd_gpu = on && r.is_ok();
+        self.hd_register_draw_area();
+        self.hd_register_display();
+        r
+    }
+
+    pub fn hd_gpu(&self) -> bool {
+        self.hd_gpu
     }
 
     /// The render scale (1 = HD off).
@@ -1362,6 +1387,18 @@ impl Gpu {
             }
         }
         Some((w * s, h * s))
+    }
+
+    /// Where the visible HD picture is on the GPU, for a host showing it from there (see
+    /// `set_hd_gpu`). `None` when the display is off or 24-bit, or no GPU surface holds it:
+    /// then `read_display` has the picture.
+    pub fn display_hd_gl(&mut self) -> Option<GlPicture> {
+        let d = self.disp;
+        if !d.on || d.rgb24 {
+            return None;
+        }
+        let (w, h) = (d.w.clamp(1, 640), d.h.clamp(1, 480));
+        self.hd.as_deref_mut()?.display_gl(&self.vram, d.x, d.y, w, h)
     }
 
     /// Display on / off (GP1 03).

@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::platform;
 use crate::settings::Settings;
+use crate::video::{Picture, Video};
 
 /// The Switch's vsync paces the game at 60 fields a second (the PS1 runs at 59.817), so the sound
 /// plays at the rate libspu renders it at 60 Hz and never falls behind the picture.
@@ -35,6 +36,7 @@ mod button {
 
 struct SwitchHost {
     frame: Vec<u32>,
+    video: Video,
     pacer: Pacer,
     stats: FrameStats,
     settings: Settings,
@@ -74,6 +76,14 @@ impl Pacer {
         self.skipped = 0;
         true
     }
+}
+
+/// What the VBlank shows, as the GPU model has it.
+enum Shown {
+    Off,
+    Gpu(backend::hd::GlPicture, i32),
+    /// In `SwitchHost::frame`: width, height, lines of the PS1's display.
+    Frame(usize, usize, i32),
 }
 
 /// Where the time between VBlanks goes: the game (its 1x drawing and any HD drawing it waits for
@@ -162,7 +172,7 @@ impl SwitchHost {
         }
         if self.settings != before {
             self.settings.save(&self.settings_path);
-            platform::note(&self.settings.describe());
+            self.video.note(&self.settings.describe());
         }
     }
 }
@@ -182,16 +192,29 @@ impl psyq::libetc::Host for SwitchHost {
             return;
         }
         let drawing = Instant::now();
+        let frame = &mut self.frame;
         let (shown, scale) = psyq::gpu::with(|g| {
-            let shown = if g.scale() > 1 {
-                g.read_display_hd(&mut self.frame)
+            let scale = g.scale();
+            if let Some(p) = g.display_hd_gl() {
+                return (Shown::Gpu(p, p.h / scale as i32), scale);
+            }
+            // The CPU's HD picture when it draws the surfaces; else (1x, movies) the 1x picture
+            // for the GPU to scale.
+            let read = if scale > 1 && !g.hd_gpu() {
+                g.read_display_hd(frame).map(|(w, h)| (w, h, (h / scale as usize) as i32))
             } else {
-                g.read_display(&mut self.frame)
+                frame.resize(frame.len().max(640 * 480), 0);
+                g.read_display(frame).map(|(w, h)| (w, h, h as i32))
             };
-            (shown, g.scale())
+            let shown = read.map_or(Shown::Off, |(w, h, lines)| Shown::Frame(w, h, lines));
+            (shown, scale)
         });
         let presenting = Instant::now();
-        platform::present(shown.map(|(w, h)| (&self.frame[..w * h], w, h)), scale);
+        self.video.present(match shown {
+            Shown::Off => Picture::Off,
+            Shown::Gpu(p, lines) => Picture::Gpu(p, lines),
+            Shown::Frame(w, h, lines) => Picture::Pixels(&self.frame[..w * h], w, h, lines),
+        });
         let hd = presenting - drawing;
         self.stats
             .add(game, hd, presenting.elapsed() + (drawing - started), scale, true);
@@ -208,11 +231,18 @@ impl psyq::libetc::Host for SwitchHost {
 }
 
 pub fn install(settings_path: PathBuf) {
+    let video = Video::new().unwrap_or_else(|e| platform::fatal(&format!("OpenGL: {e}")));
+    eprintln!("dw1: OpenGL {}", video.describe());
+    // the HD surfaces on the GPU; when it can't draw them, the CPU does (with its boost)
+    if let Err(e) = psyq::gpu::with(|g| g.set_hd_gpu(true)) {
+        eprintln!("dw1: the CPU draws the HD picture: {e}");
+    }
     let settings = Settings::load(&settings_path);
     settings.apply();
     psyq::libspu::set_audio_sink(Box::new(platform::audio));
     psyq::libetc::set_host(Box::new(SwitchHost {
         frame: vec![0; 640 * 480],
+        video,
         pacer: Pacer::new(Instant::now()),
         stats: FrameStats::new(),
         settings,

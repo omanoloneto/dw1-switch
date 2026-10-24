@@ -5,6 +5,7 @@ mod disc;
 mod host;
 mod platform;
 mod settings;
+mod video;
 
 #[path = "../../dw1/src/pc_text.rs"]
 mod pc_text;
