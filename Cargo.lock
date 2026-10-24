@@ -243,6 +243,7 @@ dependencies = [
 name = "dw1-switch"
 version = "0.1.0"
 dependencies = [
+ "backend",
  "decomp-c",
  "pack",
  "psyq",

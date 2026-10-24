@@ -4,6 +4,7 @@
 mod disc;
 mod host;
 mod platform;
+mod settings;
 
 #[path = "../../dw1/src/pc_text.rs"]
 mod pc_text;
@@ -12,7 +13,8 @@ mod saves;
 
 use std::path::Path;
 
-/// Everything the game keeps on the SD card: the disc image, the save slots, the disc check's stamp.
+/// Everything the game keeps on the SD card: the disc image, the save slots, the settings and the
+/// disc check's stamp.
 const ROOT: &str = "sdmc:/switch/dw1";
 
 #[unsafe(no_mangle)]
@@ -25,7 +27,7 @@ pub extern "C" fn dw1_switch_main() -> i32 {
     let disc = disc::open(root).unwrap_or_else(|e| platform::fatal(&e));
     psyq::libcd::insert_disc(disc);
     insert_slots(root).unwrap_or_else(|e| platform::fatal(&e));
-    host::install();
+    host::install(settings::Settings::path(root));
     // The overlays' initialised data as linked, for their reloads (decomp_c::overlays).
     decomp_c::overlays::snapshot();
     // SAFETY: the game's main loop, which runs on this thread for the rest of the program.

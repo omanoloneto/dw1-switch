@@ -12,6 +12,7 @@ name = "dw1_switch"
 crate-type = ["staticlib"]
 
 [dependencies]
+backend = { path = "../backend" }
 decomp-c = { path = "../decomp-c" }
 pack = { path = "../pack" }
 psyq = { path = "../psyq" }

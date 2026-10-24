@@ -46,6 +46,18 @@ Start it from the Homebrew Menu while holding R over a game (title mode), which 
 
 By position, as on the PS1 pad: B = Cross, A = Circle, Y = Square, X = Triangle, L/R = L1/R1, ZL/ZR = L2/R2, − = Select, + = Start, D-pad or left stick = D-pad.
 
+## Picture settings
+
+Hold **R3** (click the right stick, which the PS1 pad doesn't have; the game sees no input while it's held) and press:
+
+| Combo | Setting | Values |
+|---|---|---|
+| R3 + Up / Down | Render scale | 1x (the PS1's picture), 2x, 3x (fills 720p) |
+| R3 + Y | No wobble (3D at the GTE's precise positions; scale 2x and up) | on / off |
+| R3 + X | Full colour (8 bits a channel, no dither; scale 2x and up) | on / off |
+
+A note in the corner shows the new settings, and they're kept in `sdmc:/switch/dw1/settings.txt` (the Mac app's keys: `render_scale`, `no_wobble`, `full_colour`). The HD picture is drawn on the CPU; its drawing threads run on cores 1 and 2 (`switch/source/threads.c`), the game on core 0.
+
 ## Don't distribute builds
 
 The `.nro` holds code and text made from the game. It's for your own console; don't share it.

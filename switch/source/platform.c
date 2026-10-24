@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 #include <netinet/in.h>
@@ -12,6 +13,8 @@
 #include <switch.h>
 
 int dw1_switch_main(void);
+int __real_pthread_create(pthread_t *thread, const pthread_attr_t *attr, void *(*start)(void *),
+			  void *arg);
 
 enum {
 	PS_L2 = 1 << 0,
@@ -39,6 +42,10 @@ static int texture_w, texture_h;
 static SDL_AudioDeviceID audio;
 static Uint32 audio_max_queued;
 static PadState pad;
+static u64 held;
+static SDL_Texture *note;
+static int note_w, note_h;
+static Uint32 note_until;
 
 int dw1_platform_init(uint32_t audio_hz)
 {
@@ -71,6 +78,7 @@ int dw1_platform_init(uint32_t audio_hz)
 	return 0;
 }
 
+/* Events, and the controllers' state for this VBlank: the PS1 also read its pads once a field. */
 bool dw1_platform_pump(void)
 {
 	SDL_Event event;
@@ -78,7 +86,50 @@ bool dw1_platform_pump(void)
 		if (event.type == SDL_QUIT)
 			return false;
 	}
+	padUpdate(&pad);
+	held = padGetButtons(&pad);
 	return true;
+}
+
+uint64_t dw1_platform_buttons(void)
+{
+	return held;
+}
+
+/* A line of text in the picture's corner for two seconds, in libnx's 16x16 console font. */
+void dw1_platform_note(const char *text)
+{
+	enum { GLYPH = 16, PAD = 8, MAX_CHARS = 72 };
+	const ConsoleFont *font = &consoleGetDefault()->font;
+	int len = (int)strnlen(text, MAX_CHARS);
+	int w = len * GLYPH + 2 * PAD;
+	int h = GLYPH + 2 * PAD;
+	Uint32 *px = malloc((size_t)w * h * sizeof(Uint32));
+	if (!px)
+		return;
+	for (int i = 0; i < w * h; i++)
+		px[i] = 0xFF10121A;
+	for (int k = 0; k < len; k++) {
+		int c = (unsigned char)text[k] - font->asciiOffset;
+		if (c < 0 || c >= font->numChars)
+			continue;
+		const u16 *glyph = (const u16 *)font->gfx + GLYPH * c;
+		for (int y = 0; y < GLYPH; y++) {
+			for (int x = 0; x < GLYPH; x++) {
+				if (glyph[y] & (0x8000 >> x))
+					px[(PAD + y) * w + PAD + k * GLYPH + x] = 0xFFEBEEF5;
+			}
+		}
+	}
+	if (note)
+		SDL_DestroyTexture(note);
+	note = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, w, h);
+	if (note)
+		SDL_UpdateTexture(note, NULL, px, w * (int)sizeof(Uint32));
+	free(px);
+	note_w = w;
+	note_h = h;
+	note_until = SDL_GetTicks() + 2000;
 }
 
 /* The PS1's picture is always shown at 4:3, whatever the video mode's resolution. */
@@ -115,14 +166,16 @@ void dw1_platform_present(const uint32_t *pixels, int w, int h)
 			SDL_RenderCopy(renderer, texture, NULL, &dst);
 		}
 	}
+	if (note && !SDL_TICKS_PASSED(SDL_GetTicks(), note_until)) {
+		SDL_Rect corner = { 24, 24, note_w, note_h };
+		SDL_RenderCopy(renderer, note, NULL, &corner);
+	}
 	SDL_RenderPresent(renderer);
 }
 
 /* Buttons by position, as on the PS1 pad: the bottom one is Cross, the right one is Circle. */
 uint32_t dw1_platform_pad(void)
 {
-	padUpdate(&pad);
-	u64 held = padGetButtons(&pad);
 	static const struct {
 		u64 nx;
 		uint32_t ps;
@@ -217,7 +270,8 @@ int main(int argc, char **argv)
 	pthread_t thread;
 	pthread_attr_init(&attr);
 	pthread_attr_setstacksize(&attr, GAME_STACK_SIZE);
-	if (pthread_create(&thread, &attr, game_thread, NULL) != 0)
+	/* unwrapped (threads.c): the game stays on the default core, core 0 */
+	if (__real_pthread_create(&thread, &attr, game_thread, NULL) != 0)
 		dw1_platform_fatal("Couldn't start the game's thread.");
 	pthread_join(thread, NULL);
 	return game_status;

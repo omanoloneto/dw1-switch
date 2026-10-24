@@ -7,6 +7,8 @@ unsafe extern "C" {
     fn dw1_platform_pump() -> bool;
     fn dw1_platform_present(pixels: *const u32, w: i32, h: i32);
     fn dw1_platform_pad() -> u32;
+    fn dw1_platform_buttons() -> u64;
+    fn dw1_platform_note(text: *const c_char);
     fn dw1_platform_audio(samples: *const i16, count: usize);
     fn dw1_platform_fatal(message: *const c_char) -> !;
 }
@@ -18,7 +20,7 @@ pub fn init(audio_hz: u32) -> Result<(), String> {
     }
 }
 
-/// False when the system asks the game to close.
+/// False when the system asks the game to close. Also takes the controllers' state for this field.
 pub fn pump() -> bool {
     unsafe { dw1_platform_pump() }
 }
@@ -36,6 +38,18 @@ pub fn present(frame: Option<(&[u32], usize, usize)>) {
 
 pub fn pad() -> u32 {
     unsafe { dw1_platform_pad() }
+}
+
+/// The buttons held this field, as libnx's `HidNpadButton` bits.
+pub fn buttons() -> u64 {
+    unsafe { dw1_platform_buttons() }
+}
+
+/// Shows `text` in the picture's corner for two seconds.
+pub fn note(text: &str) {
+    if let Ok(text) = CString::new(text) {
+        unsafe { dw1_platform_note(text.as_ptr()) }
+    }
 }
 
 pub fn audio(samples: &[i16]) {

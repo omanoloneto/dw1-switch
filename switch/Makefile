@@ -18,7 +18,7 @@ PKG_CONFIG  := $(DEVKITPRO)/portlibs/switch/bin/aarch64-none-elf-pkg-config
 ARCH        := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 CFLAGS      := -g -O2 -Wall -ffunction-sections -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer \
                $(ARCH) -D__SWITCH__ -I$(LIBNX)/include $(shell $(PKG_CONFIG) --cflags sdl2)
-LDFLAGS     := -specs=$(LIBNX)/switch.specs -g $(ARCH) -Wl,-Map,$(BUILD)/$(TARGET).map
+LDFLAGS     := -specs=$(LIBNX)/switch.specs -g $(ARCH) -Wl,-Map,$(BUILD)/$(TARGET).map -Wl,--wrap=pthread_create
 LIBS        := $(shell $(PKG_CONFIG) --libs sdl2) -lnx -lm
 
 OBJS        := $(patsubst source/%.c,$(BUILD)/%.o,$(wildcard source/*.c))
