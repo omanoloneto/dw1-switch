@@ -1,0 +1,17 @@
+[package]
+name = "dw1-switch"
+description = "Digimon World as a native Nintendo Switch homebrew"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "dw1_switch"
+crate-type = ["staticlib"]
+
+[dependencies]
+decomp-c = { path = "../decomp-c" }
+pack = { path = "../pack" }
+psyq = { path = "../psyq" }

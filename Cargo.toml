@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/pack", "crates/psyq", "crates/decomp-c", "crates/dw1", "crates/backend", "crates/gpu-diff", "crates/decoder-diff", "crates/render"]
+members = ["crates/pack", "crates/psyq", "crates/decomp-c", "crates/dw1", "crates/backend", "crates/gpu-diff", "crates/decoder-diff", "crates/render", "crates/switch"]
 
 [workspace.package]
 edition = "2024"
