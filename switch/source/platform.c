@@ -96,6 +96,16 @@ uint64_t dw1_platform_buttons(void)
 	return held;
 }
 
+/*
+ * The system's boost mode (CPU at 1785 MHz instead of 1020, GPU at its minimum, which one textured
+ * quad a frame doesn't notice): the HD picture is drawn on the CPU. Only applications have it, so
+ * it fails quietly when the homebrew runs as an applet.
+ */
+void dw1_platform_boost(bool on)
+{
+	appletSetCpuBoostMode(on ? ApmCpuBoostMode_FastLoad : ApmCpuBoostMode_Normal);
+}
+
 /* A line of text in the picture's corner for two seconds, in libnx's 16x16 console font. */
 void dw1_platform_note(const char *text)
 {

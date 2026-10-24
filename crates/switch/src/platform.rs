@@ -9,6 +9,7 @@ unsafe extern "C" {
     fn dw1_platform_pad() -> u32;
     fn dw1_platform_buttons() -> u64;
     fn dw1_platform_note(text: *const c_char);
+    fn dw1_platform_boost(on: bool);
     fn dw1_platform_audio(samples: *const i16, count: usize);
     fn dw1_platform_fatal(message: *const c_char) -> !;
 }
@@ -51,6 +52,11 @@ pub fn note(text: &str) {
     if let Ok(text) = CString::new(text) {
         unsafe { dw1_platform_note(text.as_ptr()) }
     }
+}
+
+/// The CPU's boost mode on or off.
+pub fn boost(on: bool) {
+    unsafe { dw1_platform_boost(on) }
 }
 
 pub fn audio(samples: &[i16]) {

@@ -95,6 +95,7 @@ impl Settings {
         psyq::gpu::with(|g| {
             if g.scale() != self.scale {
                 g.set_scale(self.scale);
+                crate::platform::boost(self.scale > 1);
             }
             if g.full_colour() != self.full_colour {
                 g.set_full_colour(self.full_colour);
