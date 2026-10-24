@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 #include <netinet/in.h>
 
@@ -189,6 +190,8 @@ void __libnx_exception_handler(ThreadExceptionDump *ctx)
 /* The Mac's main thread has 8 MB of stack; the game gets as much on a thread of its own. */
 enum { GAME_STACK_SIZE = 8 << 20 };
 
+#define LOG_PATH "sdmc:/switch/dw1/dw1.log"
+
 static int game_status;
 
 static void *game_thread(void *arg)
@@ -202,10 +205,13 @@ int main(int argc, char **argv)
 {
 	(void)argc;
 	(void)argv;
-	/* started by nxlink: text output goes to the computer's terminal */
+	/* started by nxlink, text output goes to the computer's terminal; otherwise to a log on the SD card */
 	if (__nxlink_host.s_addr != 0 && R_SUCCEEDED(socketInitializeDefault())) {
 		atexit(socketExit);
 		nxlinkStdio();
+	} else if (freopen(LOG_PATH, "w", stdout)) {
+		dup2(fileno(stdout), STDERR_FILENO);
+		setvbuf(stdout, NULL, _IOLBF, 0);
 	}
 	pthread_attr_t attr;
 	pthread_t thread;
