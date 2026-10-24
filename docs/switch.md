@@ -58,6 +58,7 @@ The `.nro` holds code and text made from the game. It's for your own console; do
 - [x] `psyq::memory`: the packet link window is `__data_start`..`__end__` from `switch.ld` (7.9 MB of the 16 MB links reach).
 - [x] First linked `.nro` (9 MB): only relative relocations; `getrandom`, `pread` and `sysconf` shimmed in `switch/source/libc_shims.c`.
 - [x] The game runs on its own thread with 8 MB of stack, as the Mac's main thread has; a crash prints its addresses through nxlink.
-- [ ] Running on the console: title screen, sound, input, saving.
+- [x] Runs on the console (2026-10-24, Switch with Atmosphère): boots, plays, with picture, sound and input.
+- [ ] Saving and loading confirmed on the console.
 - [ ] Performance on the console (HD scale, `backend::hd` threads).
 - [ ] Options without a keyboard (scale, no wobble, full colour) through button combos.
