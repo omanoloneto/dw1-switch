@@ -18,11 +18,16 @@ const ROOT: &str = "sdmc:/switch/dw1";
 #[unsafe(no_mangle)]
 pub extern "C" fn dw1_switch_main() -> i32 {
     let root = Path::new(ROOT);
+    // A stop or a panic shows its message in the system's error dialog, besides the log.
+    psyq::trap::set_stop_hook(|message| platform::fatal(message));
+    std::panic::set_hook(Box::new(|info| platform::fatal(&info.to_string())));
     platform::init(host::AUDIO_HZ).unwrap_or_else(|e| platform::fatal(&e));
     let disc = disc::open(root).unwrap_or_else(|e| platform::fatal(&e));
     psyq::libcd::insert_disc(disc);
     insert_slots(root).unwrap_or_else(|e| platform::fatal(&e));
     host::install();
+    // The overlays' initialised data as linked, for their reloads (decomp_c::overlays).
+    decomp_c::overlays::snapshot();
     // SAFETY: the game's main loop, which runs on this thread for the rest of the program.
     unsafe { decomp_c::dw1_game_main() }
 }
