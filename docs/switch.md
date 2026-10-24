@@ -59,6 +59,7 @@ The `.nro` holds code and text made from the game. It's for your own console; do
 - [x] First linked `.nro` (9 MB): only relative relocations; `getrandom`, `pread` and `sysconf` shimmed in `switch/source/libc_shims.c`.
 - [x] The game runs on its own thread with 8 MB of stack, as the Mac's main thread has; a crash prints its addresses through nxlink.
 - [x] Runs on the console (2026-10-24, Switch with Atmosphère): boots, plays, with picture, sound and input.
-- [ ] Saving and loading confirmed on the console.
-- [ ] Performance on the console (HD scale, `backend::hd` threads).
+- [x] Saving and loading on the console (slot files load in the Mac app too).
+- [x] Speed on the console at 1x: 60 fields a second, 3-11 ms of game a field (16.7 ms budget); loads stall for 0.3-4 s.
+- [ ] HD scale on the console (2x/3x, `backend::hd` threads) and shorter load stalls.
 - [ ] Options without a keyboard (scale, no wobble, full colour) through button combos.
