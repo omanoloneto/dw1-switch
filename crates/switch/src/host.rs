@@ -15,6 +15,13 @@ pub const AUDIO_HZ: u32 =
 /// How many VBlanks each timing line in the log covers (five seconds).
 const STATS_EVERY: u32 = 300;
 
+/// One field of the Switch's 60 Hz display.
+const FIELD: Duration = Duration::from_nanos(16_666_667);
+/// Most fields in a row left unshown while catching up with the clock.
+const MAX_SKIPPED: u32 = 3;
+/// Further behind than this (a load), the clock starts again instead of catching up.
+const MAX_LAG: Duration = Duration::from_millis(250);
+
 /// libnx's `HidNpadButton` bits the settings combos use.
 mod button {
     pub const X: u64 = 1 << 2;
@@ -28,10 +35,45 @@ mod button {
 
 struct SwitchHost {
     frame: Vec<u32>,
+    pacer: Pacer,
     stats: FrameStats,
     settings: Settings,
     settings_path: PathBuf,
     held: u64,
+}
+
+/// Which fields are shown. The game draws a new picture every two or three fields, and a field
+/// it finishes late isn't shown, so the cheap fields after it catch up with the clock instead of
+/// each waiting for the display: a slow picture costs a skipped frame, not the game's speed.
+struct Pacer {
+    start: Instant,
+    fields: u32,
+    skipped: u32,
+}
+
+impl Pacer {
+    fn new(now: Instant) -> Pacer {
+        Pacer {
+            start: now,
+            fields: 0,
+            skipped: 0,
+        }
+    }
+
+    fn show(&mut self, now: Instant) -> bool {
+        self.fields += 1;
+        let due = self.start + FIELD * self.fields;
+        if now > due + MAX_LAG {
+            *self = Pacer::new(now);
+            return true;
+        }
+        if now > due + FIELD && self.skipped < MAX_SKIPPED {
+            self.skipped += 1;
+            return false;
+        }
+        self.skipped = 0;
+        true
+    }
 }
 
 /// Where the time between VBlanks goes: the game (its 1x drawing and any HD drawing it waits for
@@ -44,6 +86,7 @@ struct FrameStats {
     worst: Duration,
     present: Duration,
     fields: u32,
+    shown: u32,
 }
 
 impl FrameStats {
@@ -55,6 +98,7 @@ impl FrameStats {
             worst: Duration::ZERO,
             present: Duration::ZERO,
             fields: 0,
+            shown: 0,
         }
     }
 
@@ -66,7 +110,8 @@ impl FrameStats {
             .saturating_sub(self.present)
     }
 
-    fn add(&mut self, game: Duration, hd: Duration, present: Duration, scale: u32) {
+    fn add(&mut self, game: Duration, hd: Duration, present: Duration, scale: u32, shown: bool) {
+        self.shown += u32::from(shown);
         self.game += game;
         self.hd += hd;
         self.worst = self.worst.max(game + hd);
@@ -74,10 +119,12 @@ impl FrameStats {
         self.fields += 1;
         if self.fields == STATS_EVERY {
             let ms = |d: Duration| d.as_secs_f64() * 1000.0 / f64::from(STATS_EVERY);
+            let seconds = self.since.elapsed().as_secs_f64();
             eprintln!(
-                "dw1: {:.1} fields/s at {scale}x: game {:.2} ms + HD {:.2} ms a field (worst {:.2}), \
-                 present {:.2} ms",
-                f64::from(STATS_EVERY) / self.since.elapsed().as_secs_f64(),
+                "dw1: {:.1} fields/s ({:.1} shown) at {scale}x: game {:.2} ms + HD {:.2} ms a field \
+                 (worst {:.2}), present {:.2} ms",
+                f64::from(STATS_EVERY) / seconds,
+                f64::from(self.shown) / seconds,
                 ms(self.game),
                 ms(self.hd),
                 self.worst.as_secs_f64() * 1000.0,
@@ -129,6 +176,11 @@ impl psyq::libetc::Host for SwitchHost {
         }
         self.handle_combos(platform::buttons());
         self.settings.apply();
+        if !self.pacer.show(started) {
+            self.stats
+                .add(game, Duration::ZERO, started.elapsed(), self.settings.scale, false);
+            return;
+        }
         let drawing = Instant::now();
         let (shown, scale) = psyq::gpu::with(|g| {
             let shown = if g.scale() > 1 {
@@ -141,7 +193,8 @@ impl psyq::libetc::Host for SwitchHost {
         let presenting = Instant::now();
         platform::present(shown.map(|(w, h)| (&self.frame[..w * h], w, h)), scale);
         let hd = presenting - drawing;
-        self.stats.add(game, hd, presenting.elapsed() + (drawing - started), scale);
+        self.stats
+            .add(game, hd, presenting.elapsed() + (drawing - started), scale, true);
     }
 
     /// The pad reads nothing while R3 is held, so a combo never reaches the game.
@@ -160,6 +213,7 @@ pub fn install(settings_path: PathBuf) {
     psyq::libspu::set_audio_sink(Box::new(platform::audio));
     psyq::libetc::set_host(Box::new(SwitchHost {
         frame: vec![0; 640 * 480],
+        pacer: Pacer::new(Instant::now()),
         stats: FrameStats::new(),
         settings,
         settings_path,
