@@ -18,6 +18,8 @@
 #[path = "overlays.rs"]
 mod overlays;
 
+use overlays::ObjectFormat;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
@@ -51,6 +53,12 @@ const HOST_ALLOWED: &[&str] = &[
     "_memset",
     "_bzero",
 ];
+
+/// The newlib symbols the game C may reference on the Switch: `setjmp.h`'s replacement and the
+/// memory functions clang emits itself (the `HOST_ALLOWED` of the ELF build).
+const NEWLIB_ALLOWED: &[&str] = &["setjmp", "longjmp", "memcpy", "memmove", "memset"];
+
+const SWITCH_TARGET_ARGS: &[&str] = &["--target=aarch64-none-elf", "-ffreestanding"];
 
 /// Headers bindgen reads, relative to the include path.
 const BOUND_HEADERS: &[&str] = &[
@@ -96,16 +104,23 @@ fn main() {
     let generated = out.join("generated");
     generate_text_headers(&decomp, &python, &generated);
 
-    let cpp_args = preprocessor_args(&[
+    let format = ObjectFormat::of_target();
+    let mut cpp_args = preprocessor_args(&[
         &native_include,
         &decomp.join("include"),
         &psyq_include,
         &generated,
     ]);
+    if format == ObjectFormat::Elf {
+        cpp_args.extend(SWITCH_TARGET_ARGS.iter().map(|a| a.to_string()));
+    }
     let sources = c_sources(&decomp);
     let objects_dir = out.join("sjis");
 
     let mut build = cc::Build::new();
+    if format == ObjectFormat::Elf {
+        configure_switch(&mut build);
+    }
     build
         .std("gnu99")
         .warnings(true)
@@ -202,7 +217,7 @@ fn main() {
             let keeps = overlays::keeps(&defs, &resident);
             let wrapper = wrappers_dir.join(rel);
             fs::create_dir_all(wrapper.parent().unwrap()).unwrap();
-            write_if_changed(&wrapper, &overlays::wrapper(unit, rel, &file, &keeps));
+            write_if_changed(&wrapper, &overlays::wrapper(format, unit, rel, &file, &keeps));
             overlay_build.file(&wrapper);
             overlay_files.entry(unit.to_string()).or_default().push(rel.clone());
         } else {
@@ -210,14 +225,18 @@ fn main() {
         }
     }
     let bounds = out.join("overlay_bounds.c");
-    write_if_changed(&bounds, &overlays::bounds_c(&overlay_files));
+    write_if_changed(&bounds, &overlays::bounds_c(format, &overlay_files));
     overlay_build.file(&bounds);
     build.compile("decomp");
     overlay_build.compile("decomp_overlays");
     write_if_changed(&out.join("overlays_table.rs"), &overlays::table(&overlay_files));
 
-    check_host_symbols(&out.join("libdecomp.a"));
-    check_host_symbols(&out.join("libdecomp_overlays.a"));
+    for archive in ["libdecomp.a", "libdecomp_overlays.a"] {
+        match format {
+            ObjectFormat::MachO => check_host_symbols(&out.join(archive)),
+            ObjectFormat::Elf => check_newlib_symbols(&out.join(archive)),
+        }
+    }
 
     generate_bindings(&cpp_args, &out);
 
@@ -434,6 +453,75 @@ fn check_host_symbols(archive: &Path) {
         bound_to_host.is_empty(),
         "game C would call macOS libc for {bound_to_host:?}: rename them in \
          include/dw1_native.h and implement them in crates/psyq"
+    );
+}
+
+fn devkitpro() -> PathBuf {
+    println!("cargo:rerun-if-env-changed=DEVKITPRO");
+    env::var_os("DEVKITPRO").map_or_else(|| PathBuf::from("/opt/devkitpro"), PathBuf::from)
+}
+
+fn devkita64_tool(name: &str) -> PathBuf {
+    devkitpro().join("devkitA64/bin").join(format!("aarch64-none-elf-{name}"))
+}
+
+/// The Switch build: clang makes the ELF objects and devkitA64's `ar` archives them. The code is
+/// PIE for the `.nro` and keeps its frame pointers, which `switch/source/backtrace.c` walks.
+fn configure_switch(build: &mut cc::Build) {
+    let opt = env::var("OPT_LEVEL").unwrap_or_else(|_| "2".into());
+    build
+        .compiler("clang")
+        .archiver(devkita64_tool("ar"))
+        .no_default_flags(true)
+        .flag("-march=armv8-a+crc+crypto")
+        .flag("-mtune=cortex-a57")
+        .flag("-fPIE")
+        .flag("-ffunction-sections")
+        .flag("-fno-omit-frame-pointer")
+        .flag("-mno-omit-leaf-frame-pointer")
+        .flag(format!("-O{opt}"))
+        .flag("-g");
+}
+
+fn elf_symbols(archive: &Path, defined: bool) -> BTreeSet<String> {
+    let mut nm = Command::new(devkita64_tool("nm"));
+    nm.arg("--format=just-symbols");
+    if defined {
+        nm.args(["--extern-only", "--defined-only"]);
+    } else {
+        nm.arg("--undefined-only");
+    }
+    let output = nm.arg(archive).output().expect("running devkitA64's nm");
+    assert!(output.status.success(), "nm failed on {}", archive.display());
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.is_empty() && !l.ends_with(':'))
+        .map(str::to_string)
+        .collect()
+}
+
+/// `check_host_symbols` for the Switch: no game C call may bind to devkitA64's newlib.
+fn check_newlib_symbols(archive: &Path) {
+    let lib = devkitpro().join("devkitA64/aarch64-none-elf/lib");
+    let mut host = BTreeSet::new();
+    for name in ["libc.a", "libm.a", "libsysbase.a"] {
+        let pic = lib.join("pic").join(name);
+        let path = if pic.exists() { pic } else { lib.join(name) };
+        if path.exists() {
+            host.extend(elf_symbols(&path, true));
+        }
+    }
+    assert!(!host.is_empty(), "newlib not found in {}", lib.display());
+    let defined = elf_symbols(archive, true);
+    let bound_to_host: Vec<_> = elf_symbols(archive, false)
+        .into_iter()
+        .filter(|s| !defined.contains(s) && host.contains(s) && !NEWLIB_ALLOWED.contains(&s.as_str()))
+        .collect();
+    assert!(
+        bound_to_host.is_empty(),
+        "game C would call newlib for {bound_to_host:?}: rename them in include/dw1_native.h and \
+         implement them in crates/psyq"
     );
 }
 
