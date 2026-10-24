@@ -1,5 +1,7 @@
 # dw1-silicon
 
+> **dw1-switch fork:** a Nintendo Switch port. Read `docs/switch.md` before working on the Switch target; the rest of this file is upstream's (dw1-silicon) and applies to the Mac app. Everything in this repo is written in English.
+
 A native arm64 macOS port of Digimon World (PS1, USA SLUS-01032), built from the
 jype0/dw_decomp matching decompilation with the PS1 libraries replaced by a Mac layer
 written in Rust (DW2-PC is the reference). **Read `PLAN.md` before doing anything**:
