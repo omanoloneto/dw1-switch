@@ -975,13 +975,17 @@ pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()>
     use std::io::Write;
     let tmp = temp_path(path);
     let result = (|| {
+        // Every run on the Switch has the same process id, so a temporary file a crash left
+        // behind would take this name for good.
+        #[cfg(target_os = "horizon")]
+        let _ = std::fs::remove_file(&tmp);
         let mut f = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&tmp)?;
         f.write_all(bytes)?;
         f.sync_all()?;
-        std::fs::rename(&tmp, path)?;
+        replace_file(&tmp, path)?;
         sync_dir(path)
     })();
     if result.is_err() {
@@ -990,12 +994,33 @@ pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()>
     result
 }
 
+/// Renames `from` over `to`. Horizon's rename refuses an existing target, so there the old file
+/// goes first (the new one is already synced in `from`).
+fn replace_file(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(target_os = "horizon")]
+    {
+        match std::fs::remove_file(to) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    std::fs::rename(from, to)
+}
+
+#[cfg(not(target_os = "horizon"))]
 fn sync_dir(path: &std::path::Path) -> std::io::Result<()> {
     let dir = match path.parent() {
         Some(dir) if !dir.as_os_str().is_empty() => dir,
         _ => std::path::Path::new("."),
     };
     std::fs::File::open(dir)?.sync_all()
+}
+
+/// Horizon has no directory handles to sync: a rename is on the SD card when it returns.
+#[cfg(target_os = "horizon")]
+fn sync_dir(_path: &std::path::Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// A card kept whole in one file (`card1.mcd`), the old file first kept as `<file>.bak` once
