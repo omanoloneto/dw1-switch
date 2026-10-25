@@ -397,17 +397,33 @@ impl Drive {
         } else {
             DATA_OFFSET
         };
-        let mut raw = [0u8; pack::RAW_SECTOR];
-        for (i, chunk) in out.chunks_exact_mut(size).take(sectors).enumerate() {
-            let lba = u32::try_from(self.pos + i as i32)
+        // Runs of contiguous sectors in one read each; a run the image can't give whole is read
+        // again sector by sector, which reports the first sector that fails, as before.
+        const RUN_SECTORS: usize = 64;
+        let count = sectors.min(out.len() / size);
+        let mut raw = vec![0u8; RUN_SECTORS.min(count.max(1)) * pack::RAW_SECTOR];
+        let mut done = 0;
+        while done < count {
+            let n = (count - done).min(RUN_SECTORS);
+            let lba = u32::try_from(self.pos + done as i32)
                 .map_err(|_| DriveError::Disc(format!("read at negative sector {}", self.pos)))?;
-            self.disc
-                .read_raw(lba, &mut raw)
-                .map_err(|e| DriveError::Disc(e.to_string()))?;
-            for p in self.patches.iter().filter(|p| p.lba == lba) {
-                raw[p.offset..p.offset + p.bytes.len()].copy_from_slice(&p.bytes);
+            let run = &mut raw[..n * pack::RAW_SECTOR];
+            if self.disc.read_raw_run(lba, run).is_err() {
+                for (i, sector) in run.chunks_exact_mut(pack::RAW_SECTOR).enumerate() {
+                    let sector: &mut [u8; pack::RAW_SECTOR] = sector.try_into().unwrap();
+                    self.disc
+                        .read_raw(lba + i as u32, sector)
+                        .map_err(|e| DriveError::Disc(e.to_string()))?;
+                }
             }
-            chunk.copy_from_slice(&raw[start..start + size]);
+            for (i, sector) in run.chunks_exact_mut(pack::RAW_SECTOR).enumerate() {
+                let lba = lba + i as u32;
+                for p in self.patches.iter().filter(|p| p.lba == lba) {
+                    sector[p.offset..p.offset + p.bytes.len()].copy_from_slice(&p.bytes);
+                }
+                out[(done + i) * size..][..size].copy_from_slice(&sector[start..start + size]);
+            }
+            done += n;
         }
         self.pos += sectors as i32;
         Ok(())

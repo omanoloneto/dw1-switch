@@ -371,8 +371,15 @@ impl CardKeeper for SlotKeeper {
     }
 }
 
+#[cfg(not(target_os = "horizon"))]
 fn sync_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::File::open(dir)?.sync_all()
+}
+
+/// Horizon has no directory handles to sync: a rename is on the SD card when it returns.
+#[cfg(target_os = "horizon")]
+fn sync_dir(_dir: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// Reads a memory card image (`.mcd`/`.mcr`, 128 KB).

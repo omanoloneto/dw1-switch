@@ -11,7 +11,8 @@ use crate::memory::{LINK_END, ptr_of_link};
 /// default, is off: nothing but the 1x picture); `DW1_HD_THREADS=<n>` sets the drawing threads
 /// (default one per core, at most 8); `DW1_PGXP=1` draws 3D polygons on the HD surfaces at
 /// their precise projected positions ("no wobble"; nothing changes at scale 1); `DW1_FULL_COLOUR=1`
-/// shades the HD surfaces on 8 bits a channel without the dither.
+/// shades the HD surfaces on 8 bits a channel without the dither; `DW1_WIDE=1` gives them
+/// widescreen margins (nothing changes at scale 1).
 static GPU: LazyLock<Mutex<Gpu>> = LazyLock::new(|| {
     let mut gpu = Gpu::new();
     let env = |name: &str| {
@@ -25,6 +26,7 @@ static GPU: LazyLock<Mutex<Gpu>> = LazyLock::new(|| {
     if let Some(s) = env("DW1_SCALE") {
         gpu.set_scale(s);
     }
+    gpu.set_wide(env("DW1_WIDE") == Some(1));
     backend::pgxp::set_enabled(gpu.scale() > 1 && env("DW1_PGXP") == Some(1));
     gpu.set_full_colour(env("DW1_FULL_COLOUR") == Some(1));
     Mutex::new(gpu)
@@ -32,7 +34,65 @@ static GPU: LazyLock<Mutex<Gpu>> = LazyLock::new(|| {
 
 /// Runs `f` on the GPU. The game is single-threaded; the lock only keeps this sound.
 pub fn with<R>(f: impl FnOnce(&mut Gpu) -> R) -> R {
-    f(&mut GPU.lock().unwrap())
+    let mut gpu = GPU.lock().unwrap();
+    let r = f(&mut gpu);
+    // The game C reads this without the lock (`renderDigimon`'s draw-only wide test, map.c's
+    // extra tile); an atomic keeps it current after every GPU call.
+    let margin = if (gpu.scale() > 1) && gpu.wide() {
+        backend::hd::WIDE_MARGIN
+    } else {
+        0
+    };
+    crate::native::set_widescreen_margin(margin);
+    r
+}
+
+/// Bytes of one map tile in `WIDE_TILE_PIXELS`: 128x128 8-bit texels (`MapTileData`'s imagePtr).
+const WIDE_TILE_BYTES: usize = 128 * 128;
+
+/// The map tile pixels the game captured for the extra widescreen column
+/// (`dw1_plus_set_tile_pixels`, decomp map.c's setupMap): tile `i` is at `i * WIDE_TILE_BYTES`.
+static WIDE_TILE_PIXELS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// `dw1_plus_set_tile_pixels` (`crates/decomp-c/include/dw1_native.h`): the static buffer the
+/// widescreen's extra map tile column is drawn from. It lives for the process, so the address is
+/// kept; a new map only changes its contents.
+#[unsafe(no_mangle)]
+pub extern "C" fn dw1_plus_set_tile_pixels(pixels: *const u8) {
+    WIDE_TILE_PIXELS.store(pixels as usize, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The private opcode of the packet that draws one extra widescreen map tile (decomp map.c).
+/// Only `DW1_PLUS` code makes it, the PS1 never had it, and the 1x picture never contained those
+/// pixels (they lie outside the game's draw area), so only the HD surfaces take it.
+const DW1_PLUS_TILE_OP: u32 = 0xE7;
+
+/// Most map tiles the C side captures (its `MAP_TILES[35]`).
+const DW1_PLUS_TILES_MAX: usize = 35;
+
+/// Draws one extra widescreen map tile from the pixels `dw1_plus_set_tile_pixels` kept (128x128
+/// 8-bit texels, tile `w[0] & 0xFFFF`) and the live CLUT at the point `w[3]` names, as the HD
+/// surfaces' `plus_tile`. `w[1]`/`w[2]` are the primitive's x and y (the drawing offset is the
+/// GPU's, as for any primitive) and its width and height.
+fn wide_tile(gpu: &mut Gpu, w: &[u32]) {
+    let base = WIDE_TILE_PIXELS.load(std::sync::atomic::Ordering::Relaxed);
+    let tile = (w[0] & 0x3F) as usize;
+    let (u0, v0) = (((w[0] >> 6) & 0x7F) as i32, ((w[0] >> 13) & 0x7F) as i32);
+    if base == 0 || tile >= DW1_PLUS_TILES_MAX {
+        return;
+    }
+    let (x, y) = (
+        (w[1] as u16 as i16) as i32,
+        ((w[1] >> 16) as u16 as i16) as i32,
+    );
+    let (tw, th) = ((w[2] & 0xFFFF) as i32, ((w[2] >> 16) & 0xFFFF) as i32);
+    let clut = w[3] & 0xFFFF;
+    let cx = ((clut & 0x3F) as i32) * 16;
+    let cy = ((clut >> 6) & 0x1FF) as i32;
+    // The buffer is the C side's static array, valid for the process.
+    let at = base + tile * WIDE_TILE_BYTES;
+    let px = unsafe { std::slice::from_raw_parts(at as *const u8, WIDE_TILE_BYTES) };
+    gpu.plus_tile(x, y, tw, th, (cx, cy), (u0, v0), px);
 }
 
 /// Longest chain `draw_chain` follows before deciding the list loops.
@@ -94,7 +154,15 @@ pub unsafe fn draw_chain(head: *const u32) {
             words.clear();
             if len > 0 {
                 words.extend((1..=len).map(|i| unsafe { p.add(i).read() }));
-                whole &= gpu.gp0(&words);
+                if words[0] >> 24 == DW1_PLUS_TILE_OP {
+                    // The widescreen's extra map tile: HD only, so the 1x picture and the
+                    // command-boundary accounting are untouched.
+                    if words.len() >= 4 {
+                        wide_tile(gpu, &words);
+                    }
+                } else {
+                    whole &= gpu.gp0(&words);
+                }
             }
             if tag & LINK_END == LINK_END {
                 // The frame is drawn: its projections are done with.

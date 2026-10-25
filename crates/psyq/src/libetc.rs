@@ -21,6 +21,13 @@ pub trait Host: Send {
     fn vsync_count(&mut self, native: u32) -> u32 {
         native
     }
+    /// Whether a loop polling the pad (`PadRead` again from the same caller within a VBlank)
+    /// lets a VBlank pass before each poll, as the PS1's VBlank interrupt keeps updating the pad
+    /// while the game spins (`handlePause` waits for Start that way, without `VSync`). A replay
+    /// answers the recorded polls instead.
+    fn polls_take_time(&self) -> bool {
+        true
+    }
 }
 
 struct Clock {
@@ -151,6 +158,9 @@ static POLLS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0
 /// The VBlank of the latest `PadRead` call.
 static LAST_POLL_VBLANK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
+/// The game code that made the latest `PadRead` call.
+static LAST_POLL_CALLER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// The VBlank (as in [`vblank_count`]) of the latest `PadRead` call.
 pub fn last_poll_vblank() -> u32 {
     LAST_POLL_VBLANK.load(std::sync::atomic::Ordering::Relaxed)
@@ -165,7 +175,15 @@ pub fn polls() -> u32 {
 /// high half, 1 = pressed]. DW1 passes 0 or 1; both read both pads [doc].
 #[unsafe(no_mangle)]
 pub extern "C" fn PadRead(_id: i32) -> u32 {
+    use std::sync::atomic::Ordering::Relaxed;
     let caller = caller_address();
+    let now = vblank_count();
+    let again = LAST_POLL_CALLER.swap(caller, Relaxed) == caller
+        && LAST_POLL_VBLANK.load(Relaxed) == now
+        && POLLS.load(Relaxed) > 0;
+    if again && CLOCK.lock().unwrap().host.as_ref().is_some_and(|h| h.polls_take_time()) {
+        run_until(now + 1);
+    }
     let host = CLOCK.lock().unwrap().host.take();
     POLLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     LAST_POLL_VBLANK.store(vblank_count(), std::sync::atomic::Ordering::Relaxed);
@@ -237,5 +255,22 @@ mod tests {
             "3 since the last wait (5) had passed, so it waits one"
         );
         assert_eq!(VSync(-1), 9);
+        // A loop polling the pad from one place lets a VBlank pass before each poll after the
+        // first one in a VBlank (`handlePause`); polls from different places don't.
+        // (through a pointer, as the game's C calls it: not inlined, so its caller is a call site)
+        let read = std::hint::black_box(PadRead as extern "C" fn(i32) -> u32);
+        #[inline(never)]
+        fn poll(read: extern "C" fn(i32) -> u32) -> u32 {
+            // (not a tail call either)
+            std::hint::black_box(read(0))
+        }
+        for _ in 0..3 {
+            poll(read);
+        }
+        assert_eq!(VSync(-1), 11);
+        read(0);
+        read(0);
+        assert_eq!(VSync(-1), 11);
+        assert_eq!(*seen.lock().unwrap(), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
     }
 }

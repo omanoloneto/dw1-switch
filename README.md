@@ -1,3 +1,14 @@
+# dw1-switch
+
+A fork of [dw1-silicon](https://github.com/loafykitten/dw1-silicon) that adds a **Nintendo Switch**
+target: Digimon World as a native `.nro` homebrew, running the same decompiled game C and Rust
+PS1 layer as the Mac app, with SDL2, OpenGL and libnx underneath. **Playable on the console:**
+the PS1's picture or 2x and 3x drawn by the Switch's GPU, widescreen, no wobble, saves.
+Building, the SD card layout, controls and status are in [docs/switch.md](docs/switch.md).
+As with the Mac app, you need your own disc image, and builds are for your own console only.
+
+The rest of this README is upstream's and describes the Mac app, which this fork keeps working.
+
 # dw1-silicon
 
 A native Apple Silicon port of **Digimon World** (PlayStation, 1999; USA release

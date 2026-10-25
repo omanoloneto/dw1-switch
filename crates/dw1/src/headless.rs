@@ -29,6 +29,9 @@
 //! Without a replay, the triggers run at every pad poll too. Stale `ckpt_NNNN_*` files in
 //! `DW1_OUT` are deleted when the run starts (only those). `tools/oracle/compare_canon.py` compares them with the emulator's.
 //! `DW1_CARD_DUMP=1` also writes the card images then (`card1.mcd`, `card2.mcd`).
+//!
+//! `DW1_GL=1` draws the HD surfaces with OpenGL (the Switch's renderer, `backend::hd`) in a
+//! hidden window's context instead of on the CPU, for comparing the two.
 
 use std::path::PathBuf;
 
@@ -254,8 +257,47 @@ fn pad_script(path: &std::path::Path) -> Vec<(u32, u32)> {
     script
 }
 
+/// `DW1_GL=1`: an OpenGL 4.1 core context on this thread (the game's) for the HD surfaces.
+fn start_gl() {
+    let started = (|| -> Result<String, String> {
+        let sdl = sdl3::init().map_err(|e| e.to_string())?;
+        let video = sdl.video().map_err(|e| e.to_string())?;
+        let attr = video.gl_attr();
+        attr.set_context_profile(sdl3::video::GLProfile::Core);
+        attr.set_context_version(4, 1);
+        attr.set_context_flags().forward_compatible().set();
+        let window = video
+            .window("dw1", 64, 64)
+            .opengl()
+            .hidden()
+            .build()
+            .map_err(|e| e.to_string())?;
+        let context = window.gl_create_context().map_err(|e| e.to_string())?;
+        window.gl_make_current(&context).map_err(|e| e.to_string())?;
+        let gl = backend::gl::init(&|name| {
+            video
+                .gl_get_proc_address(&name.to_string_lossy())
+                .map_or(std::ptr::null(), |f| f as *const std::ffi::c_void)
+        })?;
+        psyq::gpu::with(|g| g.set_hd_gpu(true))?;
+        // the context has to outlive the run
+        std::mem::forget((context, window, video, sdl));
+        Ok(gl.describe())
+    })();
+    match started {
+        Ok(gpu) => eprintln!("dw1: HD surfaces drawn with OpenGL ({gpu})"),
+        Err(e) => {
+            eprintln!("dw1: DW1_GL: {e}");
+            std::process::exit(2);
+        }
+    }
+}
+
 impl Headless {
     pub fn from_env() -> Headless {
+        if std::env::var("DW1_GL").is_ok_and(|v| v == "1") {
+            start_gl();
+        }
         let shots = std::env::var("DW1_SHOTS").ok().map(|s| {
             let parts: Vec<u32> = s.split(':').filter_map(|p| p.parse().ok()).collect();
             match parts[..] {
@@ -362,6 +404,10 @@ impl Headless {
 }
 
 impl psyq::libetc::Host for Headless {
+    fn polls_take_time(&self) -> bool {
+        self.replay.is_none()
+    }
+
     fn vblank(&mut self, vblank: u32) {
         if backend::gpu::dump_polygons() {
             eprintln!("V {vblank}");
@@ -369,14 +415,18 @@ impl psyq::libetc::Host for Headless {
         if std::env::var_os("DW1_HD_STATS").is_some() {
             // the HD drawing time of this field (a display read-out included, as the window does it)
             let mut out = Vec::new();
-            let (ns, read_ns) = psyq::gpu::with(|g| {
+            let (ns, read_ns, gpu) = psyq::gpu::with(|g| {
                 g.read_display_hd(&mut out);
                 let flushed = g.hd_flush_ns();
                 let t = std::time::Instant::now();
                 g.read_display_hd(&mut out); // the queue is empty now: the read-out alone
-                (flushed, t.elapsed().as_nanos())
+                (flushed, t.elapsed().as_nanos(), g.hd_gl_stats())
             });
-            eprintln!("hdstat {vblank} {} {read_ns}", ns - self.hd_ns_seen);
+            // with DW1_GL, the GPU path's counts so far (its times reported a frame or so late)
+            let gpu = gpu.map_or(String::new(), |s| {
+                format!(" gpu {} {} {} {} {}", s.gpu_ns, s.samples, s.submits, s.uploaded, s.copied)
+            });
+            eprintln!("hdstat {vblank} {} {read_ns}{gpu}", ns.saturating_sub(self.hd_ns_seen));
             self.hd_ns_seen = ns;
         }
         if let Some(path) = std::env::var_os("DW1_VRAM_DUMP")

@@ -1,3 +1,4 @@
 [submodule "decomp"]
 	path = decomp
-	url = https://github.com/loafykitten/dw_decomp
+	url = https://github.com/omanoloneto/dw_decomp
+	branch = dw1-switch

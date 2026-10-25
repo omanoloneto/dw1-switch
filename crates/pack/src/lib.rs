@@ -227,6 +227,18 @@ impl Disc {
         self.read_at(u64::from(lba) * RAW_SECTOR as u64, out)
     }
 
+    /// Reads the raw sectors from `lba` on into `out`, a whole number of them, in one read of the
+    /// image: on the Switch every read is a call to the file system service, so a drive read of
+    /// many sectors shouldn't make one a sector.
+    pub fn read_raw_run(&self, lba: u32, out: &mut [u8]) -> Result<(), DiscError> {
+        let count = (out.len() / RAW_SECTOR) as u32;
+        if out.len() % RAW_SECTOR != 0 || lba.checked_add(count).is_none_or(|end| end > self.sectors)
+        {
+            return Err(DiscError::OutOfRange(lba.saturating_add(count)));
+        }
+        self.read_at(u64::from(lba) * RAW_SECTOR as u64, out)
+    }
+
     /// Reads the 2048 user data bytes of sector `lba` (a Form 2 sector, which has 2324 data
     /// bytes, yields its first 2048).
     pub fn read_data(&self, lba: u32, out: &mut [u8; SECTOR_DATA]) -> Result<(), DiscError> {
