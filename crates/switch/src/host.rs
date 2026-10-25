@@ -95,8 +95,12 @@ struct FrameStats {
     hd: Duration,
     worst: Duration,
     present: Duration,
+    /// Of `present`, the swap (which waits for the GPU and the vsync).
+    swap: Duration,
     fields: u32,
     shown: u32,
+    /// The GPU's HD drawing time and samples at the last report.
+    gpu_seen: (u64, u64),
 }
 
 impl FrameStats {
@@ -107,8 +111,10 @@ impl FrameStats {
             hd: Duration::ZERO,
             worst: Duration::ZERO,
             present: Duration::ZERO,
+            swap: Duration::ZERO,
             fields: 0,
             shown: 0,
+            gpu_seen: (0, 0),
         }
     }
 
@@ -120,27 +126,43 @@ impl FrameStats {
             .saturating_sub(self.present)
     }
 
-    fn add(&mut self, game: Duration, hd: Duration, present: Duration, scale: u32, shown: bool) {
+    fn add(&mut self, game: Duration, hd: Duration, present: Duration, swap: Duration, scale: u32, shown: bool) {
         self.shown += u32::from(shown);
         self.game += game;
         self.hd += hd;
         self.worst = self.worst.max(game + hd);
         self.present += present;
+        self.swap += swap;
         self.fields += 1;
         if self.fields == STATS_EVERY {
             let ms = |d: Duration| d.as_secs_f64() * 1000.0 / f64::from(STATS_EVERY);
             let seconds = self.since.elapsed().as_secs_f64();
+            // the GPU's HD drawing (reported a frame or so late), per field
+            let gpu = psyq::gpu::with(|g| g.hd_gpu_time());
+            let gpu_text = gpu.map_or(String::new(), |(ns, samples)| {
+                let (ns0, samples0) = self.gpu_seen;
+                format!(
+                    "; GPU {:.2} ms, {}k samples a field",
+                    ns.saturating_sub(ns0) as f64 / 1e6 / f64::from(STATS_EVERY),
+                    samples.saturating_sub(samples0) / 1000 / u64::from(STATS_EVERY),
+                )
+            });
             eprintln!(
-                "dw1: {:.1} fields/s ({:.1} shown) at {scale}x: game {:.2} ms + HD {:.2} ms a field \
-                 (worst {:.2}), present {:.2} ms",
+                "dw1: {:.1} fields/s ({:.1} shown) at {scale}x{}: game {:.2} ms + HD {:.2} ms a field \
+                 (worst {:.2}), present {:.2} ms (swap {:.2}){gpu_text}",
                 f64::from(STATS_EVERY) / seconds,
                 f64::from(self.shown) / seconds,
+                if platform::docked() { " docked" } else { " handheld" },
                 ms(self.game),
                 ms(self.hd),
                 self.worst.as_secs_f64() * 1000.0,
                 ms(self.present),
+                ms(self.swap),
             );
-            *self = FrameStats::new();
+            *self = FrameStats {
+                gpu_seen: gpu.unwrap_or_default(),
+                ..FrameStats::new()
+            };
         }
     }
 }
@@ -187,8 +209,14 @@ impl psyq::libetc::Host for SwitchHost {
         self.handle_combos(platform::buttons());
         self.settings.apply();
         if !self.pacer.show(started) {
-            self.stats
-                .add(game, Duration::ZERO, started.elapsed(), self.settings.scale, false);
+            self.stats.add(
+                game,
+                Duration::ZERO,
+                started.elapsed(),
+                Duration::ZERO,
+                self.settings.scale,
+                false,
+            );
             return;
         }
         let drawing = Instant::now();
@@ -210,14 +238,14 @@ impl psyq::libetc::Host for SwitchHost {
             (shown, scale)
         });
         let presenting = Instant::now();
-        self.video.present(match shown {
+        let swap = self.video.present(match shown {
             Shown::Off => Picture::Off,
             Shown::Gpu(p, lines) => Picture::Gpu(p, lines),
             Shown::Frame(w, h, lines) => Picture::Pixels(&self.frame[..w * h], w, h, lines),
         });
         let hd = presenting - drawing;
-        self.stats
-            .add(game, hd, presenting.elapsed() + (drawing - started), scale, true);
+        let present = presenting.elapsed() + (drawing - started);
+        self.stats.add(game, hd, present, swap, scale, true);
     }
 
     /// The pad reads nothing while R3 is held, so a combo never reaches the game.

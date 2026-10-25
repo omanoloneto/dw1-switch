@@ -7,6 +7,7 @@ unsafe extern "C" {
     fn dw1_platform_error() -> *const c_char;
     fn dw1_platform_gl_proc(name: *const c_char) -> *const c_void;
     fn dw1_platform_swap();
+    fn dw1_platform_docked() -> bool;
     fn dw1_platform_pump() -> bool;
     fn dw1_platform_pad() -> u32;
     fn dw1_platform_buttons() -> u64;
@@ -36,6 +37,11 @@ pub fn gl_proc(name: &CStr) -> *const c_void {
 /// Shows what was drawn at the next vsync.
 pub fn swap() {
     unsafe { dw1_platform_swap() }
+}
+
+/// Whether the console is in its dock.
+pub fn docked() -> bool {
+    unsafe { dw1_platform_docked() }
 }
 
 /// False when the system asks the game to close. Also takes the controllers' state for this field.

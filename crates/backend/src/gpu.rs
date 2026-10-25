@@ -1281,6 +1281,11 @@ impl Gpu {
         self.hd.as_ref().map_or(0, |h| h.flush_ns)
     }
 
+    /// With the HD surfaces on the GPU, its drawing time so far (ns) and the samples it wrote.
+    pub fn hd_gpu_time(&mut self) -> Option<(u64, u64)> {
+        self.hd.as_deref_mut()?.gpu_time()
+    }
+
     /// A rectangle textured from a 128x128 8-bit tile in RAM (`px`), with the palette at the
     /// VRAM point `clut`. `uv` is the source offset within that tile; clipped left-margin repairs
     /// use it to redraw transparent holes without touching the original picture. Texels are

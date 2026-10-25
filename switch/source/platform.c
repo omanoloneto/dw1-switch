@@ -65,6 +65,13 @@ int dw1_platform_init(uint32_t audio_hz)
 	if (!context)
 		return -1;
 	SDL_GL_SetSwapInterval(1);
+	if (R_SUCCEEDED(apmInitialize())) {
+		u32 handheld = 0, docked = 0;
+		apmGetPerformanceConfiguration(ApmPerformanceMode_Normal, &handheld);
+		apmGetPerformanceConfiguration(ApmPerformanceMode_Boost, &docked);
+		printf("dw1: performance configuration %#x handheld, %#x docked\n", handheld, docked);
+		apmExit();
+	}
 
 	SDL_AudioSpec want = {
 		.freq = (int)audio_hz,
@@ -95,6 +102,12 @@ void *dw1_platform_gl_proc(const char *name)
 void dw1_platform_swap(void)
 {
 	SDL_GL_SwapWindow(window);
+}
+
+/* In the dock (the GPU's clocks are higher there). */
+bool dw1_platform_docked(void)
+{
+	return appletGetOperationMode() == AppletOperationMode_Console;
 }
 
 /* Events, and the controllers' state for this VBlank: the PS1 also read its pads once a field. */

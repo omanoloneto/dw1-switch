@@ -26,6 +26,7 @@
 //! 3D polygons' edges and interpolation are in floating point rather than 4-bit sub-pixels; and a
 //! primitive with both the mask check and semi-transparency draws opaque.
 
+use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::sync::Arc;
 
@@ -53,12 +54,15 @@ in ivec4 a_tex;
 in uvec2 a_flags;
 in ivec4 a_ext;
 uniform vec2 u_size;
+uniform isamplerBuffer u_rows;
 noperspective out vec3 v_color;
 out vec2 v_uv;
 flat out vec3 v_flat;
 flat out ivec4 v_tex;
 flat out uvec2 v_flags;
 flat out ivec4 v_ext;
+flat out ivec4 v_g0;
+flat out ivec4 v_g1;
 void main() {
     vec2 ndc = a_pos.xy / u_size * 2.0 - 1.0;
     gl_Position = vec4(ndc * a_pos.z, 0.0, a_pos.z);
@@ -68,6 +72,10 @@ void main() {
     v_tex = a_tex;
     v_flags = a_flags;
     v_ext = a_ext;
+    // a 2D polygon's gradients, first row, row count and pairs flag (rows_1x)
+    bool rows = (a_flags.x & 8192u) != 0u;
+    v_g0 = rows ? texelFetch(u_rows, a_ext.x) : ivec4(0);
+    v_g1 = rows ? texelFetch(u_rows, a_ext.x + 1) : ivec4(0);
 }
 "#;
 
@@ -83,6 +91,8 @@ flat in vec3 v_flat;
 flat in ivec4 v_tex;
 flat in uvec2 v_flags;
 flat in ivec4 v_ext;
+flat in ivec4 v_g0;
+flat in ivec4 v_g1;
 out vec4 o_color;
 out vec4 o_factor;
 
@@ -94,17 +104,6 @@ uint vram(int x, int y) {
 
 int expand(int v) {
     return (v << 3) | (v >> 2);
-}
-
-// floor(a * b / 65536), exact whenever it fits in 32 bits (the 1x rasterizer's 64-bit products)
-int mul16(int a, int b) {
-    uint lo = (uint(a & 0xFFFF) * uint(b & 0xFFFF)) >> 16u;
-    return int(uint(a) * uint(b >> 16) + uint(a >> 16) * uint(b & 0xFFFF) + lo);
-}
-
-// an attribute at 1x column x: its row's value `base` at the left edge `xe`, gradient `gx`
-int at1x(int gx, int base, int xe, int x) {
-    return (base + mul16(gx, (x << 16) - xe) + 0x8000) >> 16;
 }
 
 int floor_div(int a, int b) {
@@ -123,22 +122,21 @@ void main() {
     int pass = int((f >> 10) & 3u);
     bool poly = (f & 4096u) != 0u;
     bool gouraud = (f & 32768u) != 0u;
-    ivec2 hp = ivec2(gl_FragCoord.xy);
-    int x1 = hp.x / u_scale - u_origin.z + u_origin.x;
-    int y1 = hp.y / u_scale + u_origin.y;
+    ivec2 p1 = ivec2(gl_FragCoord.xy / float(u_scale));
+    int x1 = p1.x - u_origin.z + u_origin.x;
+    int y1 = p1.y + u_origin.y;
     ivec3 m = gouraud ? ivec3(floor(v_color + 1.0 / 1024.0)) : ivec3(v_flat);
     ivec2 uv = ivec2(floor(v_uv + 1.0 / 512.0));
     if ((f & 8192u) != 0u) {
-        ivec4 g0 = texelFetch(u_rows, v_ext.x);
-        ivec4 g1 = texelFetch(u_rows, v_ext.x + 1);
-        int row = v_ext.x + 2 + clamp(y1 - g1.y, 0, g1.z - 1) * 2;
-        ivec4 r0 = texelFetch(u_rows, row);
-        ivec4 r1 = texelFetch(u_rows, row + 1);
+        // the row's start column, u and v there, the pairs' start; then its colours
+        int row = v_ext.x + 2 + clamp(y1 - v_g1.y, 0, v_g1.z - 1) * 2;
+        ivec4 ra = texelFetch(u_rows, row);
+        uv = (ra.yz + ivec2(v_g0.w, v_g1.x) * (x1 - ra.x) + 0x8000) >> 16;
         if (gouraud) {
-            int xc = (g1.w & 1) != 0 ? r1.z + (((x1 - r1.z) >> 1) << 1) : x1;
-            m = clamp(ivec3(at1x(g0.x, r0.y, r0.x, xc), at1x(g0.y, r0.z, r0.x, xc), at1x(g0.z, r0.w, r0.x, xc)), 0, 255);
+            ivec3 rb = texelFetch(u_rows, row + 1).xyz;
+            int xc = (v_g1.w & 1) != 0 ? ra.w + (((x1 - ra.w) >> 1) << 1) : x1;
+            m = clamp((rb + v_g0.xyz * (xc - ra.x) + 0x8000) >> 16, 0, 255);
         }
-        uv = ivec2(at1x(g0.w, r1.x, r0.x, x1), at1x(g1.x, r1.y, r0.x, x1));
     } else if ((f & 16384u) != 0u) {
         if (x1 < v_tex.x || y1 < v_tex.y || x1 > v_tex.z || y1 > v_tex.w) discard;
         int n = v_ext.z & 0xFFFF;
@@ -243,7 +241,7 @@ int expand(int v) {
     return (v << 3) | (v >> 2);
 }
 void main() {
-    ivec2 p = ivec2(gl_FragCoord.xy) / u_scale;
+    ivec2 p = ivec2(gl_FragCoord.xy / float(u_scale));
     uint t = texelFetch(u_vram, ivec2((p.x - u_origin.z + u_origin.x) & 1023, (p.y + u_origin.y) & 511), 0).r;
     ivec3 c = ivec3(expand(int(t & 31u)), expand(int((t >> 5) & 31u)), expand(int((t >> 10) & 31u)));
     o_color = vec4(vec3(c) / 255.0, (t & 0x8000u) != 0u ? 1.0 : 0.0);
@@ -278,6 +276,9 @@ impl Drop for GlHd {
             (gl.DeleteVertexArrays)(2, [self.vao, self.empty_vao].as_ptr());
             (gl.DeleteBuffers)(2, [self.vbo, self.rows_buf].as_ptr());
             (gl.DeleteTextures)(3, [self.vram_tex, self.tiles_tex, self.rows_tex].as_ptr());
+            for q in self.timing.free.iter().chain(&self.timing.pending) {
+                (gl.DeleteQueries)(2, q.as_ptr());
+            }
         }
     }
 }
@@ -349,6 +350,17 @@ pub(crate) struct GlHd {
     tiles: Vec<Arc<[u8]>>,
     /// The 2D polygons' 1x rows (`rows_1x`).
     rows: Vec<[i32; 4]>,
+    timing: Timing,
+}
+
+/// The GPU's time drawing the queue and the samples it wrote, from queries read once the GPU has
+/// answered them (a frame or so later).
+#[derive(Default)]
+struct Timing {
+    free: Vec<[GLuint; 2]>,
+    pending: VecDeque<[GLuint; 2]>,
+    ns: u64,
+    samples: u64,
 }
 
 impl GlHd {
@@ -420,7 +432,30 @@ impl GlHd {
             batches: Vec::new(),
             tiles: Vec::new(),
             rows: Vec::new(),
+            timing: Timing::default(),
         })
+    }
+
+    /// The GPU time spent drawing queues so far, in nanoseconds, and the samples written.
+    pub(crate) fn gpu_time(&mut self) -> (u64, u64) {
+        let gl = self.gl;
+        let t = &mut self.timing;
+        while let Some(&[time, samples]) = t.pending.front() {
+            let mut ready = 0;
+            unsafe { (gl.GetQueryObjectiv)(samples, gl::QUERY_RESULT_AVAILABLE, &mut ready) };
+            if ready == 0 {
+                break;
+            }
+            let (mut ns, mut n) = (0, 0);
+            unsafe {
+                (gl.GetQueryObjectui64v)(time, gl::QUERY_RESULT, &mut ns);
+                (gl.GetQueryObjectui64v)(samples, gl::QUERY_RESULT, &mut n);
+            }
+            t.ns += ns;
+            t.samples += n;
+            t.free.push(t.pending.pop_front().unwrap());
+        }
+        (t.ns, t.samples)
     }
 
     /// A surface's texture and framebuffer, `w` x `h` pixels, black with no mask bits.
@@ -546,7 +581,22 @@ impl GlHd {
         }
         self.upload_tiles();
         self.upload_rows();
+        let gl = self.gl;
+        let queries = self.timing.free.pop().unwrap_or_else(|| {
+            let mut q = [0; 2];
+            unsafe { (gl.GenQueries)(2, q.as_mut_ptr()) };
+            q
+        });
+        unsafe {
+            (gl.BeginQuery)(gl::TIME_ELAPSED, queries[0]);
+            (gl.BeginQuery)(gl::SAMPLES_PASSED, queries[1]);
+        }
         self.draw(surfs, scale);
+        unsafe {
+            (gl.EndQuery)(gl::SAMPLES_PASSED);
+            (gl.EndQuery)(gl::TIME_ELAPSED);
+        }
+        self.timing.pending.push_back(queries);
         self.verts.clear();
         self.batches.clear();
         self.rows.clear();
@@ -773,8 +823,12 @@ impl GlHd {
 
     /// A 2D polygon's 1x interpolation (`Tri1x`) over the rows the draw area shows, for the
     /// shader: a header (the gradients, the first row, the row count, whether colours go by
-    /// pairs), then two texels a row (the left edge, the attributes there, the pairs' start).
-    /// Its place in the row buffer; None when the 1x rasterizer draws nothing of it.
+    /// pairs), then two texels a row. `Tri1x::value` at column x is
+    /// `(base + floor(gx * ((x << 16) - xe) / 65536) + 0x8000) >> 16`; with xe's whole part `xw`
+    /// and fraction `xf` that is `(c + gx * (x - xw) + 0x8000) >> 16` where
+    /// `c = base - ceil(gx * xf / 65536)`, so a row holds `xw`, the five `c` and the pairs' start,
+    /// and the shader multiplies once an attribute. Its place in the row buffer; None when the
+    /// 1x rasterizer draws nothing of it.
     fn rows_1x(&mut self, c: &Cmd, t: &TriCmd) -> Option<i32> {
         let st = &c.st;
         let t1 = Tri1x::new([&t.v[0], &t.v[1], &t.v[2]], st, t.gouraud, t.tex.as_ref(), t.semi, t.abr)?;
@@ -783,14 +837,19 @@ impl GlHd {
             return None;
         }
         let at = self.rows.len() as i32;
-        let n = |v: i64| v.clamp(i32::MIN.into(), i32::MAX.into()) as i32;
-        let gx = t1.gx.map(n);
+        let n = |v: i128| v.clamp(i32::MIN.into(), i32::MAX.into()) as i32;
+        let gx = t1.gx.map(|g| n(g.into()));
         self.rows.push([gx[0], gx[1], gx[2], gx[3]]);
         self.rows.push([gx[4], y0, y1 - y0 + 1, t1.pairs as i32]);
         for y in y0..=y1 {
             let r = t1.row(y);
-            self.rows.push([n(r.xe), n(r.base[0]), n(r.base[1]), n(r.base[2])]);
-            self.rows.push([n(r.base[3]), n(r.base[4]), n(r.xs0), 0]);
+            let (xw, xf) = (r.xe >> 16, i128::from(r.xe & 0xFFFF));
+            let c = |i: usize| {
+                let ceil = -((-(i128::from(t1.gx[i]) * xf)) >> 16);
+                n(i128::from(r.base[i]) - ceil)
+            };
+            self.rows.push([n(xw.into()), c(3), c(4), n(r.xs0.into())]);
+            self.rows.push([c(0), c(1), c(2), 0]);
         }
         Some(at)
     }

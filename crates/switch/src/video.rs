@@ -126,8 +126,8 @@ impl Video {
         }
     }
 
-    /// Draws a field and shows it at the next vsync.
-    pub fn present(&mut self, picture: Picture) {
+    /// Draws a field and shows it at the next vsync; the time the swap took.
+    pub fn present(&mut self, picture: Picture) -> Duration {
         let gl = self.gl;
         unsafe {
             (gl.BindFramebuffer)(gl::FRAMEBUFFER, 0);
@@ -159,7 +159,9 @@ impl Video {
             (gl.BindVertexArray)(0);
             (gl.UseProgram)(0);
         }
+        let swapping = Instant::now();
         platform::swap();
+        swapping.elapsed()
     }
 
     /// Pixels `src` (x, y, w, h of a texture of `size`, row 0 at the top) into the screen rect

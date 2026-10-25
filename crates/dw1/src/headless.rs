@@ -411,14 +411,16 @@ impl psyq::libetc::Host for Headless {
         if std::env::var_os("DW1_HD_STATS").is_some() {
             // the HD drawing time of this field (a display read-out included, as the window does it)
             let mut out = Vec::new();
-            let (ns, read_ns) = psyq::gpu::with(|g| {
+            let (ns, read_ns, gpu) = psyq::gpu::with(|g| {
                 g.read_display_hd(&mut out);
                 let flushed = g.hd_flush_ns();
                 let t = std::time::Instant::now();
                 g.read_display_hd(&mut out); // the queue is empty now: the read-out alone
-                (flushed, t.elapsed().as_nanos())
+                (flushed, t.elapsed().as_nanos(), g.hd_gpu_time())
             });
-            eprintln!("hdstat {vblank} {} {read_ns}", ns - self.hd_ns_seen);
+            // with DW1_GL, the GPU's drawing time and samples so far (reported a frame or so late)
+            let gpu = gpu.map_or(String::new(), |(gns, samples)| format!(" gpu {gns} {samples}"));
+            eprintln!("hdstat {vblank} {} {read_ns}{gpu}", ns.saturating_sub(self.hd_ns_seen));
             self.hd_ns_seen = ns;
         }
         if let Some(path) = std::env::var_os("DW1_VRAM_DUMP")

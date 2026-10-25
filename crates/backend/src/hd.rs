@@ -264,6 +264,12 @@ impl Hd {
         self.gl.is_some()
     }
 
+    /// With the surfaces on the GPU: its time drawing the queue so far (ns) and the samples it
+    /// wrote, as far as the GPU has reported them.
+    pub fn gpu_time(&mut self) -> Option<(u64, u64)> {
+        self.gl.as_deref_mut().map(GlHd::gpu_time)
+    }
+
     pub fn scale(&self) -> u32 {
         self.scale as u32
     }

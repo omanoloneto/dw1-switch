@@ -68,6 +68,10 @@ pub const FUNC_REVERSE_SUBTRACT: GLenum = 0x800B;
 pub const COLOR_BUFFER_BIT: GLbitfield = 0x4000;
 pub const NO_ERROR: GLenum = 0;
 pub const VERSION: GLenum = 0x1F02;
+pub const TIME_ELAPSED: GLenum = 0x88BF;
+pub const SAMPLES_PASSED: GLenum = 0x8914;
+pub const QUERY_RESULT: GLenum = 0x8866;
+pub const QUERY_RESULT_AVAILABLE: GLenum = 0x8867;
 pub const RENDERER: GLenum = 0x1F01;
 
 macro_rules! gl_functions {
@@ -155,6 +159,12 @@ gl_functions! {
     Clear: fn(GLbitfield);
     DrawArrays: fn(GLenum, GLint, GLsizei);
     ReadPixels: fn(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, *mut c_void);
+    GenQueries: fn(GLsizei, *mut GLuint);
+    DeleteQueries: fn(GLsizei, *const GLuint);
+    BeginQuery: fn(GLenum, GLuint);
+    EndQuery: fn(GLenum);
+    GetQueryObjectiv: fn(GLuint, GLenum, *mut GLint);
+    GetQueryObjectui64v: fn(GLuint, GLenum, *mut u64);
 }
 
 static GL: OnceLock<Gl> = OnceLock::new();
