@@ -404,6 +404,10 @@ impl Headless {
 }
 
 impl psyq::libetc::Host for Headless {
+    fn polls_take_time(&self) -> bool {
+        self.replay.is_none()
+    }
+
     fn vblank(&mut self, vblank: u32) {
         if backend::gpu::dump_polygons() {
             eprintln!("V {vblank}");
