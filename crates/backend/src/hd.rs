@@ -35,7 +35,7 @@ use std::sync::Arc;
 
 #[path = "hd_gl.rs"]
 mod gl_draw;
-pub use gl_draw::GlPicture;
+pub use gl_draw::{GlPicture, GlStats};
 use gl_draw::{GlHd, GlSurf};
 
 /// Fraction bits of the fixed-point surface positions.
@@ -264,10 +264,9 @@ impl Hd {
         self.gl.is_some()
     }
 
-    /// With the surfaces on the GPU: its time drawing the queue so far (ns) and the samples it
-    /// wrote, as far as the GPU has reported them.
-    pub fn gpu_time(&mut self) -> Option<(u64, u64)> {
-        self.gl.as_deref_mut().map(GlHd::gpu_time)
+    /// With the surfaces on the GPU, what it has done so far.
+    pub fn gl_stats(&mut self) -> Option<GlStats> {
+        self.gl.as_deref_mut().map(GlHd::stats)
     }
 
     pub fn scale(&self) -> u32 {

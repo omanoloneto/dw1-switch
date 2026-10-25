@@ -99,8 +99,8 @@ struct FrameStats {
     swap: Duration,
     fields: u32,
     shown: u32,
-    /// The GPU's HD drawing time and samples at the last report.
-    gpu_seen: (u64, u64),
+    /// The GPU path's counts at the last report.
+    gpu_seen: backend::hd::GlStats,
 }
 
 impl FrameStats {
@@ -114,7 +114,7 @@ impl FrameStats {
             swap: Duration::ZERO,
             fields: 0,
             shown: 0,
-            gpu_seen: (0, 0),
+            gpu_seen: backend::hd::GlStats::default(),
         }
     }
 
@@ -137,14 +137,18 @@ impl FrameStats {
         if self.fields == STATS_EVERY {
             let ms = |d: Duration| d.as_secs_f64() * 1000.0 / f64::from(STATS_EVERY);
             let seconds = self.since.elapsed().as_secs_f64();
-            // the GPU's HD drawing (reported a frame or so late), per field
-            let gpu = psyq::gpu::with(|g| g.hd_gpu_time());
-            let gpu_text = gpu.map_or(String::new(), |(ns, samples)| {
-                let (ns0, samples0) = self.gpu_seen;
+            // the GPU path's work (its times reported a frame or so late), per field
+            let gpu = psyq::gpu::with(|g| g.hd_gl_stats());
+            let gpu_text = gpu.map_or(String::new(), |s| {
+                let s0 = self.gpu_seen;
+                let per = |now: u64, then: u64| now.saturating_sub(then) as f64 / f64::from(STATS_EVERY);
                 format!(
-                    "; GPU {:.2} ms, {}k samples a field",
-                    ns.saturating_sub(ns0) as f64 / 1e6 / f64::from(STATS_EVERY),
-                    samples.saturating_sub(samples0) / 1000 / u64::from(STATS_EVERY),
+                    "; GPU {:.2} ms, {:.0}k samples, {:.1} submits, {:.0} KB up, {:.0}k copied a field",
+                    per(s.gpu_ns, s0.gpu_ns) / 1e6,
+                    per(s.samples, s0.samples) / 1e3,
+                    per(s.submits, s0.submits),
+                    per(s.uploaded, s0.uploaded) / 1024.0,
+                    per(s.copied, s0.copied) / 1e3,
                 )
             });
             eprintln!(

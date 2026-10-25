@@ -416,10 +416,12 @@ impl psyq::libetc::Host for Headless {
                 let flushed = g.hd_flush_ns();
                 let t = std::time::Instant::now();
                 g.read_display_hd(&mut out); // the queue is empty now: the read-out alone
-                (flushed, t.elapsed().as_nanos(), g.hd_gpu_time())
+                (flushed, t.elapsed().as_nanos(), g.hd_gl_stats())
             });
-            // with DW1_GL, the GPU's drawing time and samples so far (reported a frame or so late)
-            let gpu = gpu.map_or(String::new(), |(gns, samples)| format!(" gpu {gns} {samples}"));
+            // with DW1_GL, the GPU path's counts so far (its times reported a frame or so late)
+            let gpu = gpu.map_or(String::new(), |s| {
+                format!(" gpu {} {} {} {} {}", s.gpu_ns, s.samples, s.submits, s.uploaded, s.copied)
+            });
             eprintln!("hdstat {vblank} {} {read_ns}{gpu}", ns.saturating_sub(self.hd_ns_seen));
             self.hd_ns_seen = ns;
         }

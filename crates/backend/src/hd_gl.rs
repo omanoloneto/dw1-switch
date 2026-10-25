@@ -26,6 +26,7 @@
 //! 3D polygons' edges and interpolation are in floating point rather than 4-bit sub-pixels; and a
 //! primitive with both the mask check and semi-transparency draws opaque.
 
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::sync::Arc;
@@ -359,8 +360,30 @@ pub(crate) struct GlHd {
 struct Timing {
     free: Vec<[GLuint; 2]>,
     pending: VecDeque<[GLuint; 2]>,
-    ns: u64,
-    samples: u64,
+    stats: Cell<GlStats>,
+}
+
+impl Timing {
+    fn count(&self, f: impl FnOnce(&mut GlStats)) {
+        let mut s = self.stats.get();
+        f(&mut s);
+        self.stats.set(s);
+    }
+}
+
+/// What the GPU path has done so far (counts since the surfaces went to the GPU).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GlStats {
+    /// GPU time drawing queues, in nanoseconds, as far as the GPU has reported it.
+    pub gpu_ns: u64,
+    /// Samples those draws wrote.
+    pub samples: u64,
+    /// Queue draws sent (one or more a flush).
+    pub submits: u64,
+    /// Bytes of VRAM sent to the GPU.
+    pub uploaded: u64,
+    /// Surface pixels copied from the VRAM.
+    pub copied: u64,
 }
 
 impl GlHd {
@@ -436,8 +459,8 @@ impl GlHd {
         })
     }
 
-    /// The GPU time spent drawing queues so far, in nanoseconds, and the samples written.
-    pub(crate) fn gpu_time(&mut self) -> (u64, u64) {
+    /// The counts so far, with the GPU's times as far as it has reported them.
+    pub(crate) fn stats(&mut self) -> GlStats {
         let gl = self.gl;
         let t = &mut self.timing;
         while let Some(&[time, samples]) = t.pending.front() {
@@ -451,11 +474,13 @@ impl GlHd {
                 (gl.GetQueryObjectui64v)(time, gl::QUERY_RESULT, &mut ns);
                 (gl.GetQueryObjectui64v)(samples, gl::QUERY_RESULT, &mut n);
             }
-            t.ns += ns;
-            t.samples += n;
+            t.count(|s| {
+                s.gpu_ns += ns;
+                s.samples += n;
+            });
             t.free.push(t.pending.pop_front().unwrap());
         }
-        (t.ns, t.samples)
+        t.stats.get()
     }
 
     /// A surface's texture and framebuffer, `w` x `h` pixels, black with no mask bits.
@@ -486,6 +511,7 @@ impl GlHd {
 
     /// Sends the VRAM rect x, y, w, h (inside the VRAM) to the GPU.
     pub(crate) fn upload_vram_rect(&self, vram: &[u16], (x, y, w, h): (i32, i32, i32, i32)) {
+        self.timing.count(|s| s.uploaded += (w * h * 2) as u64);
         let gl = self.gl;
         let from = &vram[y as usize * VRAM_W + x as usize..];
         unsafe {
@@ -500,6 +526,7 @@ impl GlHd {
     /// Surface pixels from the VRAM for the VRAM rect x, y, w, h inside `s` (the VRAM must have
     /// been uploaded since it last changed).
     pub(crate) fn copy_from_vram(&self, s: &Surf, gs: &GlSurf, scale: i32, (x, y, w, h): (i32, i32, i32, i32)) {
+        self.timing.count(|c| c.copied += (w * h * scale * scale) as u64);
         let gl = self.gl;
         unsafe {
             (gl.BindFramebuffer)(gl::FRAMEBUFFER, gs.fbo);
@@ -597,6 +624,7 @@ impl GlHd {
             (gl.EndQuery)(gl::TIME_ELAPSED);
         }
         self.timing.pending.push_back(queries);
+        self.timing.count(|s| s.submits += 1);
         self.verts.clear();
         self.batches.clear();
         self.rows.clear();
