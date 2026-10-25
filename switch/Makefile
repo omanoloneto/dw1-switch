@@ -11,7 +11,7 @@ RUST_LIB    ?= ../target/aarch64-nintendo-switch-newlib/release/libdw1_switch.a
 APP_TITLE   := Digimon World
 APP_AUTHOR  := dw1-switch
 APP_VERSION := 0.1.0
-ICON        ?= $(DEVKITPRO)/libnx/default_icon.jpg
+ICON        ?= icon.jpg
 
 PKG_CONFIG  := $(DEVKITPRO)/portlibs/switch/bin/aarch64-none-elf-pkg-config
 

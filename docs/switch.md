@@ -95,5 +95,9 @@ The `.nro` holds code and text made from the game. It's for your own console; do
 - [x] Options without a keyboard (scale, no wobble, full colour, widescreen) through R3 combos.
 - [x] HD on the CPU at 2x: playable with dips (menus, events); 3x too slow.
 - [x] HD on the GPU (`hd_gl.rs`): on the Mac the same picture as the CPU's, give or take the rounding above.
-- [ ] HD on the GPU on the console: 2x and 3x at 60 fields a second.
+- [x] HD on the GPU on the console (2026-10-24, handheld, GPU at 307 MHz): 3x widescreen at 60 fields a second in play, about 1 ms of GPU time a field; the CPU's part is the game's own 1x drawing, 3-8 ms a field.
+- [x] 1x triangles about 40% cheaper (one 64-bit multiply a pixel, a direct path for opaque texels; same output). Also offered upstream: [loafykitten/dw1-silicon#2](https://github.com/loafykitten/dw1-silicon/pull/2).
+- [x] Pause: Start shows the pause box and Start again resumes (`handlePause` polls the pad without a `VSync`; `PadRead` lets a VBlank pass). Also offered upstream: [loafykitten/dw1-silicon#1](https://github.com/loafykitten/dw1-silicon/pull/1).
+- [x] Homebrew Menu icon (`switch/icon.jpg`, original art).
+- [ ] The main menu at 60 fields a second at 3x (about 41 shown now: the game's 1x drawing of the wireframe on the CPU).
 - [ ] Shorter load stalls.
