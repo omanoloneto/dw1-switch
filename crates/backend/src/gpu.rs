@@ -112,6 +112,17 @@ pub(crate) const DITHER_TBL: [[i32; 4]; 4] = [
     [3, -1, 2, -2],
 ];
 
+/// A row's `c` for `value_at`: `base - ceil(gx * xf / 65536)`, xf being the left edge's fraction.
+fn row_start(base: i64, gx: i64, xe: i64) -> i64 {
+    (i128::from(base) + ((-(i128::from(gx) * i128::from(xe & 0xFFFF))) >> 16)) as i64
+}
+
+/// A polygon's interpolated value at pixel `x` of a row: `(c + gx * (x - xw) + 0x8000) >> 16`,
+/// xw being the left edge's whole part (`row_start` has the rest).
+fn value_at(c: i64, gx: i64, xw: i64, x: i64) -> i32 {
+    ((c + gx * (x - xw) + 0x8000) >> 16).clamp(i32::MIN.into(), i32::MAX.into()) as i32
+}
+
 fn sign11(v: u32) -> i32 {
     (v << 21) as i32 >> 21
 }
@@ -377,6 +388,7 @@ impl Gpu {
         self.vram[Self::idx(x, y)] = (out[0] | (out[1] << 5) | (out[2] << 10) | m) as u16;
     }
 
+    #[inline]
     fn texel(&self, t: &Tex, u: i32, v: i32) -> u16 {
         let st = &self.st;
         let u = ((u & !st.tw_mask_x) | (st.tw_off_x & st.tw_mask_x)) & 0xFF;
@@ -566,13 +578,12 @@ impl Gpu {
                 _ => p.v,
             }) as i64
         }
-        let mut used = Vec::with_capacity(5);
-        if gouraud {
-            used.extend([0, 1, 2]);
-        }
-        if t.is_some() {
-            used.extend([3, 4]);
-        }
+        let used: &[usize] = match (gouraud, t.is_some()) {
+            (true, true) => &[0, 1, 2, 3, 4],
+            (true, false) => &[0, 1, 2],
+            (false, true) => &[3, 4],
+            (false, false) => &[],
+        };
         // [obs] Interpolation, fitted to Redux (about 900,000 textured and 400,000 shaded pixels
         // checked, plus the opt-in sets: 2,500 tiny triangles with 924 pixels on exact halves,
         // and 1,500 thin ones where a step from the exact plane misses in 235; no polygon pixel
@@ -602,7 +613,7 @@ impl Gpu {
         let ratio = (((mv.y - tv.y) as i64) << 16) / (bv.y - tv.y) as i64;
         let width = ratio * (bv.x - tv.x) as i64 + (((tv.x - mv.x) as i64) << 16);
         let mut gx = [0i64; 5];
-        for &i in &used {
+        for &i in used {
             let da = ratio * (attr(&bv, i) - attr(&tv, i)) + ((attr(&tv, i) - attr(&mv, i)) << 16);
             // A widest row of zero width in 16.16 (very thin triangles only) is taken as flat:
             // not measured.
@@ -626,15 +637,21 @@ impl Gpu {
                 ((ep.x as i64) << 16) + (((eq.x - ep.x) as i64 * (y - ep.y) as i64) << 16) / den;
             // [obs] pairs count from the row's first visible pixel (after the draw area's left edge)
             let xs0 = ((xe + 0xFFFF) >> 16).max(minx as i64);
-            let mut base = [0i64; 5];
-            for &i in &used {
+            // A pixel's value is (base + floor(gx * ((x << 16) - xe) / 65536) + 0x8000) >> 16.
+            // With xe's whole part xw and fraction xf that is (c + gx * (x - xw) + 0x8000) >> 16
+            // for c = base - ceil(gx * xf / 65536): one multiply a pixel, in 64 bits (gx stays
+            // under 2^42 and x - xw under 2^11).
+            let xw = xe >> 16;
+            let mut c = [0i64; 5];
+            for &i in used {
                 let da = attr(&eq, i) - attr(&ep, i);
-                base[i] = (attr(&ep, i) << 16)
+                let base = (attr(&ep, i) << 16)
                     + if i < 3 {
                         ((da * (y - ep.y) as i64) << 16) / den
                     } else {
                         ((da << 16) / den) * (y - ep.y) as i64
                     };
+                c[i] = row_start(base, gx[i], xe);
             }
             // The covered pixels of the row: each edge function is linear in x, so each gives a
             // bound (a pixel on an edge counts only on a top or left edge).
@@ -667,25 +684,39 @@ impl Gpu {
             // [obs] A semi-transparent modulated texture's last pixel of a row is blended
             // differently when the row has an odd number of pixels (the others go two at a time).
             let odd = need_tail && (last - first) % 2 == 0;
+            let opaque = !semi && !dith && !st.check_mask;
             for x in first.max(minx)..=last.min(maxx) {
                 let tail = odd && x == last;
                 let mut val = [0i32; 5];
-                for &i in &used {
-                    let xi = if i < 3 && pairs {
+                if t.is_some() {
+                    val[3] = value_at(c[3], gx[3], xw, x as i64);
+                    val[4] = value_at(c[4], gx[4], xw, x as i64);
+                }
+                let (mut r, mut g, mut b) = (v0.r, v0.g, v0.b);
+                if gouraud {
+                    let xi = if pairs {
                         xs0 + 2 * (x as i64 - xs0).div_euclid(2)
                     } else {
                         x as i64
                     };
-                    // (i128: a near-zero widest row makes the step huge)
-                    let d = (gx[i] as i128 * ((xi << 16) - xe) as i128) >> 16;
-                    let q = base[i] as i128 + d + 0x8000;
-                    val[i] = (q >> 16).clamp(i32::MIN.into(), i32::MAX.into()) as i32;
+                    r = value_at(c[0], gx[0], xw, xi).clamp(0, 255);
+                    g = value_at(c[1], gx[1], xw, xi).clamp(0, 255);
+                    b = value_at(c[2], gx[2], xw, xi).clamp(0, 255);
                 }
-                let (mut r, mut g, mut b) = (v0.r, v0.g, v0.b);
-                if gouraud {
-                    r = val[0].clamp(0, 255);
-                    g = val[1].clamp(0, 255);
-                    b = val[2].clamp(0, 255);
+                if let Some(t) = t.filter(|_| opaque) {
+                    // `shade` for an opaque, undithered texel with no mask check
+                    let c = self.texel(t, val[3], val[4]) as i32;
+                    if c != 0 {
+                        let (tr, tg, tb) = (c & 31, (c >> 5) & 31, (c >> 10) & 31);
+                        let (r5, g5, b5) = if t.raw {
+                            (tr, tg, tb)
+                        } else {
+                            (to5((tr * r) >> 4, 0), to5((tg * g) >> 4, 0), to5((tb * b) >> 4, 0))
+                        };
+                        let m = if c & 0x8000 != 0 || st.set_mask { 0x8000 } else { 0 };
+                        self.vram[Self::idx(x, y)] = (r5 | (g5 << 5) | (b5 << 10) | m) as u16;
+                    }
+                    continue;
                 }
                 self.shade(
                     x,
@@ -1366,6 +1397,31 @@ impl Gpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `row_start` and `value_at` give what the 1x rasterizer's own formula gives,
+    /// `(base + floor(gx * ((x << 16) - xe) / 65536) + 0x8000) >> 16` in 128 bits, over the
+    /// ranges a polygon reaches (huge steps from near-zero widest rows included).
+    #[test]
+    fn folded_interpolation_matches_the_formula() {
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = |range: i64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % (2 * range as u64 + 1)) as i64 - range
+        };
+        for _ in 0..200_000 {
+            let gx = if next(1) == 0 { next(1 << 41) } else { next(1 << 24) };
+            let base = next(1 << 25);
+            let xe = next(1024 << 16);
+            let x = (xe >> 16) + next(1100);
+            let d = (i128::from(gx) * i128::from((x << 16) - xe)) >> 16;
+            let q = i128::from(base) + d + 0x8000;
+            let want = (q >> 16).clamp(i32::MIN.into(), i32::MAX.into()) as i32;
+            let got = value_at(row_start(base, gx, xe), gx, xe >> 16, x);
+            assert_eq!(got, want, "gx {gx} base {base} xe {xe} x {x}");
+        }
+    }
 
     /// A display x far outside VRAM must wrap in 24-bit mode, not overflow (found in review;
     /// the original C overflows here).
